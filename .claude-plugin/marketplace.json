@@ -19,7 +19,7 @@
     {
       "name": "moodletutor",
       "source": "./plugins/moodletutor",
-      "description": "KI-Tutor für Moodle: Abgaben-Feedback, Lernberater und Nachrichten-Tutor als Agentensystem (benötigt MCP-Server moodle-agent)"
+      "description": "KI-Tutor für Moodle: Abgaben-Feedback, Lernberater und Nachrichten-Tutor als Agentensystem (inkl. MCP-Server moodle-agent-mcp mit Pseudonymisierung)"
     }
   ]
 }

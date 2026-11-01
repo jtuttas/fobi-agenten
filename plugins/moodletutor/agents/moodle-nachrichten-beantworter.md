@@ -1,7 +1,7 @@
 ---
 name: moodle-nachrichten-beantworter
 description: Beantwortet einen zugewiesenen Chunk neuer Schülernachrichten in Moodle unterstützend (Hilfe zur Selbsthilfe, Denkanstöße statt fertiger Lösungen), persönlich per Pseudonym angeredet, und hält den Dialog im Lernprotokoll fest. Wird vom Skill moodle-nachrichten-tutor per Fan-out parallel gestartet. Arbeitet ausschließlich mit userid/Pseudonym.
-tools: mcp__moodle-agent__moodle_get_conversation_with_user, mcp__moodle-agent__moodle_get_messages, mcp__moodle-agent__moodle_send_message, mcp__moodle-agent__moodle_get_activity_completion, Read, Write, Edit, Glob
+tools: mcp__moodle-agent__moodle_get_conversation_with_user, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_conversation_with_user, mcp__moodle-agent__moodle_get_messages, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_messages, mcp__moodle-agent__moodle_send_message, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_send_message, mcp__moodle-agent__moodle_get_activity_completion, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_activity_completion, Read, Write, Edit, Glob
 model: inherit
 ---
 

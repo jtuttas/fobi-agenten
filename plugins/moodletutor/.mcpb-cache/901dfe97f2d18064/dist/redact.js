@@ -1,0 +1,324 @@
+// ---------------------------------------------------------------------------
+// redact.ts – Pseudonymisierung personenbezogener Daten am MCP-Server
+// ---------------------------------------------------------------------------
+//
+// Zweck: Der MCP-Server ist die letzte Station unter Kontrolle der Schule,
+// bevor Tool-Ergebnisse an das (Cloud-)Modell gehen. Dieses Modul ersetzt
+// Klarnamen, E-Mail-Adressen und Logins durch stabile Pseudonyme (S-0001 …),
+// BEVOR die Antwort den Server verlässt. Die numerische userid bleibt als
+// technischer Schlüssel erhalten (sie ist ohne Zugriff auf die lokale
+// Moodle-Instanz nicht auflösbar) – dadurch funktionieren grade/send_message
+// ohne Rückübersetzung weiter.
+//
+// Die Zuordnung pseudonym <-> Klardaten liegt VERTRAULICH und ausschließlich
+// lokal in pseudonym-map.json (Pfad via PSEUDONYM_MAP überschreibbar) und wird
+// niemals an das Modell übertragen.
+//
+// Steuerung über Umgebungsvariable:  REDACT_PII=0  schaltet die Redaktion ab.
+// ---------------------------------------------------------------------------
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const REDACT_PII = (process.env.REDACT_PII ?? "1") !== "0" &&
+    (process.env.REDACT_PII ?? "1").toLowerCase() !== "false";
+// Leerer Wert (z. B. aus einer MCPB-Benutzereinstellung) gilt als nicht gesetzt.
+const MAP_PATH = process.env.PSEUDONYM_MAP?.trim() || join(HERE, "..", "pseudonym-map.json");
+const store = {
+    _info: "VERTRAULICH - Zuordnung Pseudonym zu Klardaten. NIEMALS an Modell/Cloud geben.",
+    counter: 0,
+    users: {},
+};
+let dirty = false;
+// Cache fuer den zusammengesetzten Redaktions-Matcher (siehe buildMatcher()).
+// Wird invalidiert, sobald sich der Store aendert – dadurch muss redactText die
+// (potenziell tausenden) Ersetzungsregeln nicht bei jedem Aufruf neu bauen.
+let cachedMatcher = null;
+function markStoreDirty() {
+    dirty = true;
+    cachedMatcher = null;
+}
+function loadStore() {
+    if (!existsSync(MAP_PATH))
+        return;
+    try {
+        const parsed = JSON.parse(readFileSync(MAP_PATH, "utf-8"));
+        if (parsed.users)
+            store.users = parsed.users;
+        if (typeof parsed.counter === "number")
+            store.counter = parsed.counter;
+    }
+    catch {
+        // beschädigte Datei – mit leerem Store weiterarbeiten, nichts überschreiben
+    }
+}
+loadStore();
+function persist() {
+    if (!dirty)
+        return;
+    try {
+        mkdirSync(dirname(MAP_PATH), { recursive: true });
+        writeFileSync(MAP_PATH, JSON.stringify(store, null, 2), "utf-8");
+        dirty = false;
+    }
+    catch {
+        // Schreibfehler nicht fatal – Redaktion läuft weiter (nur nicht persistent)
+    }
+}
+function ensurePseudonym(uid) {
+    const key = String(uid);
+    let id = store.users[key];
+    if (!id) {
+        store.counter += 1;
+        id = { pseudonym: `S-${String(store.counter).padStart(4, "0")}` };
+        store.users[key] = id;
+        markStoreDirty();
+    }
+    return id;
+}
+function setIf(id, field, value) {
+    if (typeof value === "string" && value.trim() && id[field] !== value) {
+        id[field] = value;
+        markStoreDirty();
+    }
+}
+/** Registriert eine Person (uid + bekannte Klardaten) und vergibt ein Pseudonym. */
+export function registerIdentity(uid, fields) {
+    if (uid === undefined || uid === null || uid === "")
+        return;
+    const id = ensurePseudonym(uid);
+    setIf(id, "fullname", fields.fullname);
+    setIf(id, "firstname", fields.firstname);
+    setIf(id, "lastname", fields.lastname);
+    setIf(id, "email", fields.email);
+    setIf(id, "username", fields.username);
+}
+const COURSE_MARKERS = ["shortname", "summaryformat", "categoryid", "modname", "summary"];
+/**
+ * Durchsucht beliebige Moodle-Antworten rekursiv nach Personen-Objekten
+ * (userid/id + fullname/userfullname/email/username) und registriert sie.
+ * Kurs-, Gruppen- und Modul-Objekte werden anhand typischer Felder ausgeschlossen.
+ */
+export function harvestIdentities(data) {
+    if (!REDACT_PII)
+        return;
+    walk(data);
+    persist();
+}
+function walk(node) {
+    if (Array.isArray(node)) {
+        for (const item of node)
+            walk(item);
+        return;
+    }
+    if (!node || typeof node !== "object")
+        return;
+    const obj = node;
+    const looksLikeCourse = COURSE_MARKERS.some((m) => m in obj);
+    const uidRaw = obj.userid ?? obj.id;
+    const uid = typeof uidRaw === "number" ? uidRaw : undefined;
+    const fullname = (typeof obj.fullname === "string" && obj.fullname) ||
+        (typeof obj.userfullname === "string" && obj.userfullname) ||
+        undefined;
+    const email = typeof obj.email === "string" && obj.email.includes("@") ? obj.email : undefined;
+    const username = typeof obj.username === "string" ? obj.username : undefined;
+    const hasUserFullname = typeof obj.userfullname === "string";
+    const isPerson = !!email ||
+        !!username ||
+        hasUserFullname ||
+        (!!fullname && !looksLikeCourse);
+    if (uid !== undefined && isPerson) {
+        registerIdentity(uid, {
+            fullname: fullname || undefined,
+            firstname: typeof obj.firstname === "string" ? obj.firstname : undefined,
+            lastname: typeof obj.lastname === "string" ? obj.lastname : undefined,
+            email,
+            username,
+        });
+    }
+    // Rekursion in verschachtelte Strukturen
+    for (const value of Object.values(obj)) {
+        if (value && typeof value === "object")
+            walk(value);
+    }
+}
+function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+/**
+ * Baut EINEN zusammengesetzten Matcher (ein Regex mit Alternation + Lookup-Map)
+ * statt tausender Einzel-Regexe. Dadurch ist redactText O(Textlänge) statt
+ * O(Nutzer × Textlänge). Ergebnis wird gecacht und nur bei Store-Änderung
+ * (markStoreDirty) neu gebaut.
+ */
+function buildMatcher() {
+    if (cachedMatcher)
+        return cachedMatcher;
+    const map = new Map(); // lowercased Begriff -> Pseudonym
+    const terms = [];
+    for (const id of Object.values(store.users)) {
+        const ps = id.pseudonym;
+        const exact = [];
+        if (id.fullname)
+            exact.push(id.fullname);
+        if (id.lastname && id.firstname)
+            exact.push(`${id.lastname}, ${id.firstname}`);
+        if (id.email)
+            exact.push(id.email);
+        if (id.username)
+            exact.push(id.username);
+        // Einzel-Token (Vor-/Nachname) für Erwähnungen mitten im Freitext
+        if (id.firstname && id.firstname.length >= 3)
+            exact.push(id.firstname);
+        if (id.lastname && id.lastname.length >= 3)
+            exact.push(id.lastname);
+        for (const term of exact) {
+            const key = term.toLowerCase();
+            if (!map.has(key)) {
+                map.set(key, ps);
+                terms.push(term);
+            }
+        }
+    }
+    // Laengste Begriffe zuerst -> die Alternation matcht "Christian Ziegner" vor
+    // "Christian". Ein einziger Regex ersetzt alle Begriffe in einem Durchlauf.
+    // Wortgrenzen ueber Unicode-Buchstaben/Ziffern/Unterstrich; Satzzeichen
+    // (Punkt, Komma) zaehlen als Grenze. E-Mails matchen als Ganzes, da ihre
+    // Punkte/@ als Literal escaped sind und der laengere Begriff zuerst greift.
+    terms.sort((a, b) => b.length - a.length);
+    const re = terms.length === 0
+        ? null
+        : new RegExp("(?<![\\p{L}\\p{N}_])(" +
+            terms.map(escapeRe).join("|") +
+            ")(?![\\p{L}\\p{N}_])", "giu");
+    cachedMatcher = { re, map };
+    return cachedMatcher;
+}
+// Erkennt http(s)://... URLs (bis zum ersten Whitespace/Anführungszeichen)
+const URL_RE = /https?:\/\/[^\s"'<>]+/g;
+/** Ersetzt alle bekannten Klardaten in einem Text durch Pseudonyme.
+ *  URLs werden vor der Redaktion geschützt und danach wiederhergestellt. */
+export function redactText(text) {
+    if (!REDACT_PII || !text)
+        return text;
+    const matcher = buildMatcher();
+    if (!matcher.re)
+        return text; // kein registrierter Nutzer -> nichts zu ersetzen
+    // URLs extrahieren und durch Platzhalter ersetzen
+    const urls = [];
+    const placeholder = "\x00URL\x00";
+    let out = text.replace(URL_RE, (match) => {
+        urls.push(match);
+        return `${placeholder}${urls.length - 1}\x00`;
+    });
+    // Redaktion in EINEM Durchlauf: der matchende Begriff (case-insensitiv) wird
+    // ueber die Map auf sein Pseudonym abgebildet.
+    out = out.replace(matcher.re, (m) => matcher.map.get(m.toLowerCase()) ?? m);
+    // URLs wiederherstellen
+    out = out.replace(new RegExp(`${placeholder}(\\d+)\x00`, "g"), (_, i) => urls[Number(i)]);
+    return out;
+}
+/** Wendet die Redaktion auf alle Text-Bestandteile eines Tool-Ergebnisses an. */
+export function redactResult(result) {
+    if (!REDACT_PII || !result || !Array.isArray(result.content))
+        return result;
+    return {
+        ...result,
+        content: result.content.map((item) => item && item.type === "text" && typeof item.text === "string"
+            ? { ...item, text: redactText(item.text) }
+            : item),
+    };
+}
+/** Loest einen Namen/Teilstring/E-Mail/Login LOKAL zu userid + Pseudonym auf.
+ *  Gibt bewusst KEINE Klarnamen zurueck (den Namen kennt das Modell bereits aus
+ *  der Nutzereingabe) - nur den technischen Schluessel und das Pseudonym. */
+export function resolveStudent(query) {
+    const q = (query || "").trim().toLowerCase();
+    if (!q)
+        return [];
+    const out = [];
+    for (const [uid, id] of Object.entries(store.users)) {
+        const fields = [id.fullname, id.firstname, id.lastname, id.email, id.username]
+            .filter(Boolean)
+            .map((x) => x.toLowerCase());
+        if (fields.some((f) => f.includes(q) || q.includes(f))) {
+            out.push({ userid: uid, pseudonym: id.pseudonym });
+        }
+    }
+    return out;
+}
+export const REHYDRATE_FIELD = (process.env.REHYDRATE_FIELD ?? "firstname").toLowerCase();
+function resolveNameForField(id, field) {
+    if (field === "email")
+        return id.email;
+    if (field === "username")
+        return id.username;
+    const firstFromFull = id.fullname ? id.fullname.trim().split(/\s+/)[0] : undefined;
+    return id.fullname || id.firstname || firstFromFull;
+}
+/**
+ * Liefert Ersetzungspaare (Pseudonym-Regex → Klarname) aus dem In-Memory-Store.
+ * Kann von externen Modulen (z.B. DOCX-Rehydrierung) genutzt werden.
+ * Längste Pseudonyme zuerst, um Teilüberlappungen zu vermeiden.
+ */
+export function getRehydrationPairs(field) {
+    const pairs = [];
+    for (const id of Object.values(store.users)) {
+        if (!id.pseudonym)
+            continue;
+        const name = resolveNameForField(id, field);
+        if (!name)
+            continue;
+        const re = new RegExp("(?<![\\p{L}\\p{N}_])" + escapeRe(id.pseudonym) + "(?![\\p{L}\\p{N}_])", "giu");
+        pairs.push({ re, repl: name, pseudonym: id.pseudonym });
+    }
+    pairs.sort((a, b) => b.re.source.length - a.re.source.length);
+    return pairs;
+}
+/**
+ * Rehydriert Text mit explizit gewähltem Feld – für moodle_rehydrate_report.
+ * Gibt nur Pseudonyme zurück (keine Klarnamen).
+ */
+export function rehydrateTextForField(text, field) {
+    if (!text)
+        return { text, replaced: [] };
+    let out = text;
+    const replaced = [];
+    for (const { re, repl, pseudonym } of getRehydrationPairs(field)) {
+        const next = out.replace(re, repl);
+        if (next !== out) {
+            replaced.push(pseudonym);
+            out = next;
+        }
+    }
+    return { text: out, replaced };
+}
+/** Gibt das Pseudonym für eine userid zurück; erstellt es bei Bedarf (stabil). */
+export function pseudonymForUser(uid) {
+    if (!REDACT_PII)
+        return String(uid);
+    const id = ensurePseudonym(uid);
+    persist();
+    return id.pseudonym;
+}
+/** Rueckweg-Rehydrierung: ersetzt Pseudonyme (S-000x) in AUSGEHENDEM Text
+ *  (Nachrichten/Feedback an Moodle) durch den echten Namen. Laeuft nur lokal,
+ *  BEVOR der Aufruf an Moodle geht - das Modell hat die Namen nie gesehen.
+ *  Standard: Vorname (REHYDRATE_FIELD=fullname fuer den ganzen Namen). */
+export function rehydrateText(text) {
+    if (!REDACT_PII || !text)
+        return text;
+    let out = text;
+    const ids = Object.values(store.users)
+        .filter((id) => id.pseudonym)
+        .sort((a, b) => b.pseudonym.length - a.pseudonym.length);
+    for (const id of ids) {
+        const firstFromFull = id.fullname ? id.fullname.trim().split(/\s+/)[0] : undefined;
+        const name = REHYDRATE_FIELD === "fullname"
+            ? id.fullname || id.firstname || firstFromFull
+            : id.firstname || firstFromFull || id.fullname;
+        if (name)
+            out = out.split(id.pseudonym).join(name);
+    }
+    return out;
+}

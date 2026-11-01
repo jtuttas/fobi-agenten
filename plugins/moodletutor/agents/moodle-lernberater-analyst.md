@@ -1,7 +1,7 @@
 ---
 name: moodle-lernberater-analyst
 description: Analysiert für einen zugewiesenen Chunk von Schülern den wöchentlichen Lernstand (Noten, Aktivitätsabschlüsse, Quiz-Versuche), schreibt das jeweilige Lernprotokoll fort und sendet eine ermutigende, per Pseudonym angeredete Moodle-Nachricht. Wird vom Skill moodle-lernberater per Fan-out parallel gestartet. Schreibt NICHT in die geteilte Datei Lernfortschritt_Kurs_<id>.md, sondern gibt die Fortschrittszeile zurück.
-tools: mcp__moodle-agent__moodle_get_course_grades, mcp__moodle-agent__moodle_get_activity_completion, mcp__moodle-agent__moodle_get_quiz_results, mcp__moodle-agent__moodle_send_message, Read, Write, Edit, Glob
+tools: mcp__moodle-agent__moodle_get_course_grades, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_course_grades, mcp__moodle-agent__moodle_get_activity_completion, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_activity_completion, mcp__moodle-agent__moodle_get_quiz_results, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_get_quiz_results, mcp__moodle-agent__moodle_send_message, mcp__plugin_moodletutor_moodle-agent-mcp__moodle_send_message, Read, Write, Edit, Glob
 model: inherit
 ---
 

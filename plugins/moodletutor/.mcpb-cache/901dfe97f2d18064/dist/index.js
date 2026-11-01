@@ -1,0 +1,1719 @@
+#!/usr/bin/env node
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
+import { harvestIdentities, redactResult, resolveStudent, rehydrateText, REDACT_PII, pseudonymForUser } from "./redact.js";
+import { rehydrateFile, RehydrateError } from "./rehydrate-file.js";
+import { extractKind, extractByKind, extractPdfText, capText, IMAGE_MIMES } from "./file-extract.js";
+import { mapEnrolledUser } from "./enrolled-users.js";
+const MOODLE_URL = (process.env.MOODLE_URL ?? "").replace(/\/$/, "");
+const MOODLE_TOKEN = process.env.MOODLE_TOKEN ?? "";
+// Timeout / Retry / Cache – alle per Env-Variable überschreibbar.
+// REQUEST_TIMEOUT_MS bricht einen hängenden Request ab (statt bis zum
+// Client-Timeout zu warten), damit ein Retry überhaupt greifen kann.
+const REQUEST_TIMEOUT_MS = Number(process.env.MOODLE_REQUEST_TIMEOUT_MS ?? 60000);
+const MAX_RETRIES = Number(process.env.MOODLE_MAX_RETRIES ?? 2);
+// mod_assign_get_assignments lädt ALLE Aufgaben eines Kurses und rendert jede
+// intro (LaTeX/Filter) – teuer. Ergebnis kurz pro Kurs cachen.
+const ASSIGN_CACHE_TTL_MS = Number(process.env.MOODLE_ASSIGN_CACHE_TTL_MS ?? 60000);
+// Größenlimits für Download-Antworten. Zu große Tool-Antworten legt der
+// MCP-Client in eine Datei ab, die das Modell dann nicht mehr lesen kann.
+// ~4 Zeichen ≈ 1 Token.
+const MAX_FILE_TEXT_CHARS = Number(process.env.MOODLE_MAX_FILE_TEXT_CHARS ?? 30000);
+const MAX_BATCH_TEXT_CHARS = Number(process.env.MOODLE_MAX_BATCH_TEXT_CHARS ?? 80000);
+// ---------------------------------------------------------------------------
+// Moodle REST API helper
+// ---------------------------------------------------------------------------
+function flattenParams(params, prefix = "") {
+    const result = {};
+    for (const [key, value] of Object.entries(params)) {
+        const fullKey = prefix ? `${prefix}[${key}]` : key;
+        if (Array.isArray(value)) {
+            value.forEach((item, index) => {
+                if (typeof item === "object" && item !== null) {
+                    Object.assign(result, flattenParams(item, `${fullKey}[${index}]`));
+                }
+                else {
+                    result[`${fullKey}[${index}]`] = String(item);
+                }
+            });
+        }
+        else if (typeof value === "object" && value !== null) {
+            Object.assign(result, flattenParams(value, fullKey));
+        }
+        else if (value !== undefined && value !== null) {
+            result[fullKey] = String(value);
+        }
+    }
+    return result;
+}
+// Ein einzelner HTTP-Versuch mit hartem Timeout (AbortController).
+async function moodleFetchOnce(bodyStr) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+        const response = await fetch(`${MOODLE_URL}/webservice/rest/server.php`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: bodyStr,
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+        const data = await response.json();
+        if (data && typeof data === "object" && "exception" in data) {
+            const err = data;
+            // Fachlicher Moodle-Fehler ist deterministisch → nicht wiederholen.
+            const e = new Error(`Moodle-Fehler [${err.errorcode ?? "?"}]: ${err.message ?? "Unbekannter Fehler"}`);
+            e.nonRetryable = true;
+            throw e;
+        }
+        return data;
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+async function moodleCall(wsfunction, params = {}) {
+    if (!MOODLE_URL || !MOODLE_TOKEN) {
+        throw new Error("Umgebungsvariablen MOODLE_URL und MOODLE_TOKEN müssen gesetzt sein.");
+    }
+    const bodyStr = new URLSearchParams({
+        wstoken: MOODLE_TOKEN,
+        wsfunction,
+        moodlewsrestformat: "json",
+        ...flattenParams(params),
+    }).toString();
+    let lastErr;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const data = await moodleFetchOnce(bodyStr);
+            // Personen-Identitäten aus der Rohantwort lernen (für die Pseudonymisierung),
+            // bevor die Daten weiterverarbeitet und an das Modell zurückgegeben werden.
+            if (REDACT_PII)
+                harvestIdentities(data);
+            return data;
+        }
+        catch (e) {
+            lastErr = e;
+            // Fachliche Moodle-Fehler und HTTP-4xx sind deterministisch → sofort werfen.
+            // Timeout (AbortError), Netzfehler und HTTP-5xx sind transient → erneut versuchen.
+            const nonRetryable = e?.nonRetryable === true ||
+                (e instanceof Error && /^HTTP 4\d\d/.test(e.message));
+            if (nonRetryable || attempt >= MAX_RETRIES) {
+                throw e;
+            }
+            // kleiner linearer Backoff vor dem nächsten Versuch
+            await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+        }
+    }
+    throw lastErr ?? new Error("moodleCall: unerwarteter Zustand");
+}
+const wsCache = new Map();
+async function moodleCallCached(wsfunction, params, ttlMs) {
+    if (ttlMs <= 0)
+        return moodleCall(wsfunction, params);
+    const key = `${wsfunction}:${JSON.stringify(params)}`;
+    const now = Date.now();
+    const hit = wsCache.get(key);
+    if (hit && hit.expires > now)
+        return hit.value;
+    const value = await moodleCall(wsfunction, params);
+    wsCache.set(key, { value, expires: now + ttlMs });
+    return value;
+}
+// ---------------------------------------------------------------------------
+// MCP Server
+// ---------------------------------------------------------------------------
+const server = new Server({ name: "moodle-agent-mcp", version: "1.0.0" }, { capabilities: { tools: {} } });
+// ---------------------------------------------------------------------------
+// Tool-Definitionen
+// ---------------------------------------------------------------------------
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [
+        {
+            name: "moodle_get_user_groups",
+            description: "Gibt alle Gruppen zurück, in denen ein Nutzer Mitglied ist – kursübergreifend (Kurs-Gruppen) und global (Kohorten/System-Gruppen). Kurs-Gruppen werden aus allen eingeschriebenen Kursen gesammelt; Kohorten werden direkt über die Kohorten-API abgefragt.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    userid: { type: "number", description: "Benutzer-ID" },
+                    include_cohorts: {
+                        type: "boolean",
+                        description: "true = auch globale Kohorten abfragen (Standard: true)",
+                    },
+                },
+                required: ["userid"],
+            },
+        },
+        {
+            name: "moodle_get_course_info",
+            description: "Gibt Metadaten eines oder mehrerer Kurse zurück: Titel, Kurztitel, Beschreibung, Kategorie, Start-/Enddatum, Sichtbarkeit, Format und Anzahl Abschnitte. Ideal als erster Schritt um Kursinformationen im Kontext zu haben.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseids: {
+                        type: "array",
+                        items: { type: "number" },
+                        description: "Liste von Kurs-IDs. Leer lassen um ALLE Kurse abzurufen.",
+                    },
+                    field: {
+                        type: "string",
+                        enum: ["id", "ids", "shortname", "idnumber", "category"],
+                        description: "Suchfeld (Standard: 'id'). Mit 'ids' können mehrere IDs übergeben werden.",
+                    },
+                },
+                required: [],
+            },
+        },
+        {
+            name: "moodle_get_enrolled_students",
+            description: "Gibt alle im Kurs eingeschriebenen Nutzer zurück (id, Name, E-Mail, Rollen). Nützlich um userids für andere Tools zu ermitteln.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseid: { type: "number", description: "Kurs-ID (steht in der URL: ?id=XX)" },
+                },
+                required: ["courseid"],
+            },
+        },
+        {
+            name: "moodle_get_activity_completion",
+            description: "Gibt den Aktivitätsabschluss-Status für einen Kurs zurück. Zeigt welche Aktivitäten ein Schüler abgeschlossen hat. Ohne userid werden ALLE eingeschriebenen Schüler abgefragt.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseid: { type: "number", description: "Kurs-ID" },
+                    userid: {
+                        type: "number",
+                        description: "Benutzer-ID (optional – ohne = alle Schüler des Kurses)",
+                    },
+                },
+                required: ["courseid"],
+            },
+        },
+        {
+            name: "moodle_get_assignment_submissions",
+            description: "Gibt alle Abgaben zu einer oder mehreren Moodle-Aufgaben (mod_assign) zurück inkl. Status, Abgabedatum und Dateiinfos. Pro Abgabe werden zusätzlich 'grade' (aktuelle Note oder null) und 'grade_timemodified' (Zeitstempel der letzten Benotung oder null) ergänzt – damit ist 'zu bewerten vs. bereits bewertet & unverändert' aus einem einzigen Response ermittelbar (Vergleich submission.timemodified > grade_timemodified).",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignmentids: {
+                        type: "array",
+                        items: { type: "number" },
+                        description: "Liste der Aufgaben-IDs (instance-ID der Aufgabe, nicht cmid)",
+                    },
+                    status: {
+                        type: "string",
+                        enum: ["", "draft", "submitted", "reopened"],
+                        description: "Filter nach Abgabe-Status (leer = alle)",
+                    },
+                },
+                required: ["assignmentids"],
+            },
+        },
+        {
+            name: "moodle_get_submission_details",
+            description: "Gibt die vollständige Abgabe eines Schülers für eine Aufgabe zurück, inkl. vorhandener Bewertung und Feedback.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: { type: "number", description: "Aufgaben-ID (instance-ID)" },
+                    userid: { type: "number", description: "Benutzer-ID des Schülers" },
+                },
+                required: ["assignid", "userid"],
+            },
+        },
+        {
+            name: "moodle_grade_assignment",
+            description: "Benotet eine Aufgaben-Abgabe und speichert schriftliches Feedback. Die Note muss zur Bewertungsskala der Aufgabe passen (z.B. 0–100).",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: { type: "number", description: "Aufgaben-ID (instance-ID)" },
+                    userid: { type: "number", description: "Benutzer-ID des Schülers" },
+                    grade: {
+                        type: "number",
+                        description: "Note (gemäß Aufgaben-Skala, z.B. 0–100; -1 = keine Bewertung)",
+                    },
+                    feedback: {
+                        type: "string",
+                        description: "Textliches Feedback an den Schüler (HTML erlaubt)",
+                    },
+                    workflowstate: {
+                        type: "string",
+                        enum: ["", "released", "readyforreview", "inreview", "readyforrelease"],
+                        description: "'released' = sofort für Schüler sichtbar; leer = Standardverhalten",
+                    },
+                },
+                required: ["assignid", "userid", "grade", "feedback"],
+            },
+        },
+        {
+            name: "moodle_grade_assignments_batch",
+            description: "Benotet mehrere Abgaben einer Aufgabe in einem einzigen Moodle-Call (mod_assign_save_grades). Deutlich schneller als wiederholtes moodle_grade_assignment für ganze Klassen. Feedback-Text darf Pseudonyme (S-0001 …) enthalten – diese werden lokal rehydriert. Bei Fehler des Batch-Calls wird automatisch auf Einzel-Saves zurückgefallen, um Teilerfolge zu ermitteln.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: { type: "number", description: "Aufgaben-ID (instance-ID)" },
+                    grades: {
+                        type: "array",
+                        description: "Liste der Bewertungen (eine pro Schüler)",
+                        items: {
+                            type: "object",
+                            properties: {
+                                userid: { type: "number", description: "Benutzer-ID des Schülers" },
+                                grade: {
+                                    type: "number",
+                                    description: "Note (gemäß Aufgaben-Skala, z.B. 0–100; -1 = keine Bewertung)",
+                                },
+                                feedback: {
+                                    type: "string",
+                                    description: "Textliches Feedback an den Schüler (HTML erlaubt, Pseudonyme werden lokal ersetzt)",
+                                },
+                                workflowstate: {
+                                    type: "string",
+                                    enum: ["", "released", "readyforreview", "inreview", "readyforrelease"],
+                                    description: "'released' = sofort für Schüler sichtbar (Standard: released)",
+                                },
+                            },
+                            required: ["userid", "grade", "feedback"],
+                        },
+                    },
+                },
+                required: ["assignid", "grades"],
+            },
+        },
+        {
+            name: "moodle_download_all_submissions",
+            description: "Lädt alle Abgabe-Dateien einer Aufgabe in einem parallelen Batch und gibt pro Schüler-Datei { userid, filename, mimetype, size_bytes, fileurl, extracted_text? } zurück. Text aus Text/Code, Word, Excel und PDF wird extrahiert (pro Datei und insgesamt größenbegrenzt; gekürzte Dateien sind mit truncated markiert). Bilder und andere Binärdateien kommen nur als Metadaten – sie einzeln mit moodle_download_submission_file(fileurl) laden, ebenso Dateien mit truncated oder skipped. Die userid bleibt als numerischer Schlüssel erhalten und ist NICHT von Pseudonymisierung betroffen – die Zuordnung userid ↔ Datei ist damit eindeutig.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: {
+                        type: "number",
+                        description: "Aufgaben-ID (instance-ID)",
+                    },
+                    status: {
+                        type: "string",
+                        enum: ["", "draft", "submitted", "reopened"],
+                        description: "Filter nach Abgabe-Status (Standard: 'submitted' – nur eingereichte Abgaben)",
+                    },
+                },
+                required: ["assignid"],
+            },
+        },
+        {
+            name: "moodle_get_quiz_results",
+            description: "Gibt Quiz-Ergebnisse zurück. Mit userid = Versuche eines Schülers; mit courseid (ohne userid) = beste Note aller Schüler im Kurs.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    quizid: { type: "number", description: "Quiz-ID (instance-ID)" },
+                    userid: {
+                        type: "number",
+                        description: "Benutzer-ID (optional – für einzelnen Schüler)",
+                    },
+                    courseid: {
+                        type: "number",
+                        description: "Kurs-ID (optional – für beste Noten ALLER Schüler, wenn userid fehlt)",
+                    },
+                    status: {
+                        type: "string",
+                        enum: ["all", "finished", "unfinished"],
+                        description: "Filter nach Versuchs-Status (Standard: all)",
+                    },
+                },
+                required: ["quizid"],
+            },
+        },
+        {
+            name: "moodle_get_course_grades",
+            description: "Gibt alle Noten eines Kurses aus dem Bewertungsbuch zurück. Optional für einen einzelnen Schüler, sonst für alle.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseid: { type: "number", description: "Kurs-ID" },
+                    userid: {
+                        type: "number",
+                        description: "Benutzer-ID (optional – ohne = alle Schüler des Kurses)",
+                    },
+                },
+                required: ["courseid"],
+            },
+        },
+        {
+            name: "moodle_get_course_modules",
+            description: "Gibt alle Kursaktivitäten und -materialien mit cmid, instance-ID, Typ (assign, quiz, page, …) und Abschlusskonfiguration zurück.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseid: { type: "number", description: "Kurs-ID" },
+                    modtype: {
+                        type: "string",
+                        description: "Filter nach Modultyp, z.B. 'assign', 'quiz', 'page' (optional)",
+                    },
+                },
+                required: ["courseid"],
+            },
+        },
+        {
+            name: "moodle_get_assignment_details",
+            description: "Liest Aufgaben-Details (Beschreibung/Intro, Abgabefrist, Bewertungsinfos) anhand der cmid – das ist die 'id' aus der Moodle-URL (z.B. view.php?id=9683).",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    cmid: {
+                        type: "number",
+                        description: "Course-Module-ID – der 'id'-Parameter aus der Moodle-URL der Aufgabe",
+                    },
+                },
+                required: ["cmid"],
+            },
+        },
+        {
+            name: "moodle_get_assignment_feedback",
+            description: "Liest das vorhandene Feedback und die Bewertung für eine Aufgabe eines Schülers aus.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: { type: "number", description: "Aufgaben-ID (instance-ID)" },
+                    userid: { type: "number", description: "Benutzer-ID des Schülers" },
+                },
+                required: ["assignid", "userid"],
+            },
+        },
+        {
+            name: "moodle_send_message",
+            description: "Sendet eine direkte Moodle-Mitteilung (Nachricht) an einen oder mehrere Schüler. Die Nachricht erscheint im Moodle-Postfach des Schülers.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    userids: {
+                        type: "array",
+                        items: { type: "number" },
+                        description: "Liste der Empfänger-Benutzer-IDs",
+                    },
+                    message: {
+                        type: "string",
+                        description: "Nachrichtentext (HTML erlaubt)",
+                    },
+                    subject: {
+                        type: "string",
+                        description: "Betreff der Nachricht (optional, wird dem Text vorangestellt)",
+                    },
+                    format: {
+                        type: "number",
+                        enum: [0, 1, 2, 4],
+                        description: "Textformat: 0=Moodle, 1=HTML (Standard), 2=Plain-Text, 4=Markdown",
+                    },
+                },
+                required: ["userids", "message"],
+            },
+        },
+        {
+            name: "moodle_send_message_to_course",
+            description: "Sendet eine direkte Moodle-Mitteilung an ALLE eingeschriebenen Schüler eines Kurses.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    courseid: { type: "number", description: "Kurs-ID" },
+                    message: {
+                        type: "string",
+                        description: "Nachrichtentext (HTML erlaubt)",
+                    },
+                    subject: {
+                        type: "string",
+                        description: "Betreff (optional, wird dem Text vorangestellt)",
+                    },
+                    format: {
+                        type: "number",
+                        enum: [0, 1, 2, 4],
+                        description: "Textformat: 0=Moodle, 1=HTML (Standard), 2=Plain-Text, 4=Markdown",
+                    },
+                },
+                required: ["courseid", "message"],
+            },
+        },
+        {
+            name: "moodle_get_submission_content",
+            description: "Liest den vollständigen Inhalt einer Schülerabgabe: Inline-Text (Online-Texteingabe) wird direkt zurückgegeben; hochgeladene Dateien werden mit ihrer fileurl gelistet. Erster Schritt bevor moodle_download_submission_file aufgerufen wird. Die fileurl NICHT per Web-Fetch öffnen – sie ist nur mit dem Server-Token abrufbar.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    assignid: { type: "number", description: "Aufgaben-ID (instance-ID)" },
+                    userid: { type: "number", description: "Benutzer-ID des Schülers" },
+                },
+                required: ["assignid", "userid"],
+            },
+        },
+        {
+            name: "moodle_download_submission_file",
+            description: "Lädt eine Datei aus einer Moodle-Abgabe herunter. Text/Code-Dateien, Word (.docx), Excel (.xlsx) und PDF werden als extrahierter Text zurückgegeben (größenbegrenzt), Bilder als Bilddaten. Die fileurl kommt aus moodle_get_submission_content oder moodle_download_all_submissions.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    fileurl: {
+                        type: "string",
+                        description: "Datei-URL aus moodle_get_submission_content (ohne Token)",
+                    },
+                    filename: {
+                        type: "string",
+                        description: "Dateiname (für MIME-Typ-Erkennung, optional)",
+                    },
+                },
+                required: ["fileurl"],
+            },
+        },
+        {
+            name: "moodle_get_messages",
+            description: "Liest Nachrichten aus dem Moodle-Posteingang oder -Ausgang eines Nutzers. Gibt Absender, Empfänger, Text und Zeitstempel zurück. Ideal um Schülerantworten auf gesendete Mitteilungen zu lesen.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    userid: {
+                        type: "number",
+                        description: "Benutzer-ID, deren Nachrichten gelesen werden (eigener Account oder Schüler-ID)",
+                    },
+                    type: {
+                        type: "string",
+                        enum: ["conversations", "notifications"],
+                        description: "'conversations' = Direktnachrichten (Standard), 'notifications' = Systemmeldungen",
+                    },
+                    direction: {
+                        type: "string",
+                        enum: ["received", "sent"],
+                        description: "'received' = Posteingang (Standard), 'sent' = gesendete Nachrichten",
+                    },
+                    read: {
+                        type: "boolean",
+                        description: "true = nur gelesene, false = nur ungelesene, weggelassen = alle",
+                    },
+                    limit: {
+                        type: "number",
+                        description: "Maximale Anzahl Nachrichten (Standard: 50)",
+                    },
+                    offset: {
+                        type: "number",
+                        description: "Offset für Pagination (Standard: 0)",
+                    },
+                },
+                required: ["userid"],
+            },
+        },
+        {
+            name: "moodle_get_conversations",
+            description: "Listet alle Konversationen (Chat-Verläufe) eines Moodle-Nutzers auf, mit letzter Nachricht, Gesprächspartner und Anzahl ungelesener Nachrichten.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    userid: {
+                        type: "number",
+                        description: "Benutzer-ID",
+                    },
+                    type: {
+                        type: "number",
+                        enum: [1, 2],
+                        description: "1 = Einzelgespräche (Standard), 2 = Gruppenkonversationen",
+                    },
+                    unread_only: {
+                        type: "boolean",
+                        description: "true = nur Konversationen mit ungelesenen Nachrichten",
+                    },
+                    limit: {
+                        type: "number",
+                        description: "Maximale Anzahl Konversationen (Standard: 20)",
+                    },
+                    offset: {
+                        type: "number",
+                        description: "Offset für Pagination (Standard: 0)",
+                    },
+                },
+                required: ["userid"],
+            },
+        },
+        {
+            name: "moodle_get_conversation_with_user",
+            description: "Liest den kompletten Nachrichtenverlauf zwischen zwei Nutzern (z.B. Lehrer und Schüler). Gibt alle Nachrichten chronologisch zurück.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    userid: {
+                        type: "number",
+                        description: "Eigene Benutzer-ID (Lehrer)",
+                    },
+                    otheruserid: {
+                        type: "number",
+                        description: "Benutzer-ID des Gesprächspartners (Schüler)",
+                    },
+                    limit: {
+                        type: "number",
+                        description: "Maximale Anzahl Nachrichten (Standard: 100)",
+                    },
+                    offset: {
+                        type: "number",
+                        description: "Offset für Pagination (Standard: 0)",
+                    },
+                },
+                required: ["userid", "otheruserid"],
+            },
+        },
+        {
+            name: "moodle_resolve_student",
+            description: "Loest einen vom Nutzer genannten Schueler (Name, Namensteil, E-Mail oder Login) LOKAL zu userid + Pseudonym auf. Nutzt die vertrauliche lokale Zuordnung und gibt NUR die Treffer zurueck (userid + Pseudonym, KEINE Klarnamen, KEINE Gesamtliste). Immer aufrufen, wenn der Nutzer einen Schueler beim Namen nennt, um danach dessen userid fuer Noten/Abgaben/Nachrichten zu verwenden.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    query: { type: "string", description: "Name, Namensteil, E-Mail oder Login des Schuelers" },
+                    courseid: { type: "number", description: "Optional: Kurs-ID, um die Zuordnung vor dem Aufloesen sicher zu befuellen" },
+                },
+                required: ["query"],
+            },
+        },
+        {
+            name: "moodle_rehydrate_report",
+            description: "Rehydriert eine lokale Berichtsdatei: Pseudonyme (S-0001 …) werden durch echte Namen ersetzt, BEVOR die Datei gespeichert wird. Die Klarnamen verlassen dabei niemals den Server – der Rückgabewert enthält nur Metadaten (Anzahl ersetzter Pseudonyme, Pseudonym-Kürzel). Unterstützt .md, .txt und .docx. Eingabepfade müssen innerhalb von REHYDRATE_BASE_DIR liegen. Ist REHYDRATE_OUT_DIR gesetzt, wird die Klartext-Ausgabe in diesen getrennten Ordner geschrieben (Eingabe wird nie überschrieben); sonst enthält das Ergebnis bei In-place- bzw. lesbarem Zielordner ein Feld 'warnung'.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    infile: {
+                        type: "string",
+                        description: "Pfad zur Eingabedatei (relativ zu REHYDRATE_BASE_DIR oder absolut darin). Erlaubt: .docx, .md, .txt",
+                    },
+                    outfile: {
+                        type: "string",
+                        description: "Pfad zur Ausgabedatei (optional). Mit REHYDRATE_OUT_DIR relativ zu diesem getrennten Ordner; ohne OUT_DIR relativ zu REHYDRATE_BASE_DIR (Standard: in-place, überschreibt infile – nur empfohlen, wenn der Ordner für CoWork NICHT lesbar ist).",
+                    },
+                    field: {
+                        type: "string",
+                        enum: ["fullname", "email", "username"],
+                        description: "Welches Klardaten-Feld als Ersetzung einsetzen (Standard: fullname)",
+                    },
+                },
+                required: ["infile"],
+            },
+        },
+        {
+            name: "moodle_list_cohorts",
+            description: "Listet alle site-weiten Kohorten (globale Gruppen) auf – inkl. Name, idnumber, Sichtbarkeit und optional Mitgliederliste (userid + Pseudonym). Erfordert die Webservice-Funktionen core_cohort_get_cohorts und core_cohort_get_cohort_members.",
+            inputSchema: {
+                type: "object",
+                properties: {
+                    include_members: {
+                        type: "boolean",
+                        description: "true = Mitgliederliste pro Kohorte laden (Standard: true). false = nur Metadaten, deutlich schneller bei vielen Kohorten.",
+                    },
+                    cohortids: {
+                        type: "array",
+                        items: { type: "number" },
+                        description: "Nur diese Kohorten-IDs abfragen (optional; leer = alle site-weiten Kohorten).",
+                    },
+                },
+                required: [],
+            },
+        },
+    ],
+}));
+// ---------------------------------------------------------------------------
+// Tool-Handler
+// ---------------------------------------------------------------------------
+const handleToolCall = async (request) => {
+    const { name, arguments: rawArgs } = request.params;
+    const args = rawArgs ?? {};
+    try {
+        switch (name) {
+            // ------------------------------------------------------------------
+            case "moodle_get_user_groups": {
+                const userid = args.userid;
+                const includeCohorts = args.include_cohorts !== false; // Standard: true
+                // Kurs-Gruppen: core_enrol_get_enrolled_users gibt pro Nutzer
+                // bereits ein 'groups'-Array zurück — keine separate Gruppen-API nötig.
+                // Strategie: alle Kurse holen, pro Kurs enrolled_users abrufen,
+                // den Zielnutzer finden und seine Gruppen extrahieren.
+                const allCourses = (await moodleCall("core_course_get_courses", {}));
+                const courseGroups = [];
+                for (const course of allCourses.filter((c) => c.id !== 1)) {
+                    try {
+                        const users = (await moodleCall("core_enrol_get_enrolled_users", {
+                            courseid: course.id,
+                        }));
+                        const targetUser = users.find((u) => u.id === userid);
+                        if (targetUser) {
+                            for (const g of targetUser.groups ?? []) {
+                                if (!courseGroups.find((x) => x.id === g.id)) {
+                                    courseGroups.push({
+                                        id: g.id,
+                                        name: g.name,
+                                        description: g.description?.replace(/<[^>]*>/g, "").trim() ?? "",
+                                        type: "course-group",
+                                        courseid: course.id,
+                                        coursename: course.fullname,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        // Kurs ohne Zugriff – überspringen
+                    }
+                }
+                const cohorts = [];
+                if (includeCohorts) {
+                    try {
+                        const result = (await moodleCall("core_cohort_search_cohorts", {
+                            query: "",
+                            context: { contextlevel: "system", instanceid: 0 },
+                            includes: "all",
+                            limitfrom: 0,
+                            limitnum: 1000,
+                        }));
+                        // Für jede Kohorte prüfen ob der Nutzer Mitglied ist
+                        for (const c of result.cohorts ?? []) {
+                            try {
+                                const members = (await moodleCall("core_cohort_get_cohort_members", {
+                                    cohortids: [c.id],
+                                }));
+                                const isMember = members[0]?.userids?.includes(userid);
+                                if (isMember) {
+                                    cohorts.push({
+                                        id: c.id,
+                                        name: c.name,
+                                        idnumber: c.idnumber,
+                                        description: c.description?.replace(/<[^>]*>/g, "").trim() ?? "",
+                                        type: "cohort",
+                                        component: c.component,
+                                    });
+                                }
+                            }
+                            catch {
+                                // Kohorte nicht zugänglich
+                            }
+                        }
+                    }
+                    catch {
+                        // Kohorten-API nicht verfügbar oder keine Berechtigung
+                    }
+                }
+                const total = courseGroups.length + cohorts.length;
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                userid,
+                                total_groups: total,
+                                course_groups: courseGroups,
+                                cohorts,
+                                note: cohorts.length === 0 && includeCohorts
+                                    ? "Keine Kohorten gefunden oder Funktion 'core_cohort_search_cohorts'/'core_cohort_get_cohort_members' nicht im Moodle-Service aktiviert."
+                                    : undefined,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_course_info": {
+                let courses;
+                const courseids = args.courseids;
+                if (courseids && courseids.length > 0) {
+                    // Konkrete IDs abrufen
+                    const result = (await moodleCall("core_course_get_courses", {
+                        options: { ids: courseids },
+                    }));
+                    courses = result;
+                }
+                else {
+                    // Alle Kurse (ohne Filter)
+                    const result = (await moodleCall("core_course_get_courses", {}));
+                    // Kurs 1 (Startseite) herausfiltern
+                    courses = result.filter((c) => c.id !== 1);
+                }
+                const mapped = courses.map((c) => ({
+                    id: c.id,
+                    fullname: c.fullname,
+                    shortname: c.shortname,
+                    idnumber: c.idnumber || null,
+                    summary: c.summary
+                        ? c.summary.replace(/<[^>]*>/g, "").trim().slice(0, 300) || null
+                        : null,
+                    format: c.format,
+                    categoryid: c.categoryid,
+                    startdate: c.startdate
+                        ? new Date(c.startdate * 1000).toISOString().slice(0, 10)
+                        : null,
+                    enddate: c.enddate && c.enddate > 0
+                        ? new Date(c.enddate * 1000).toISOString().slice(0, 10)
+                        : null,
+                    visible: c.visible === 1,
+                    lang: c.lang || null,
+                    numsections: c.numsections ?? null,
+                }));
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${mapped.length} Kurs/Kurse gefunden:\n${JSON.stringify(mapped, null, 2)}`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_enrolled_students": {
+                const data = (await moodleCall("core_enrol_get_enrolled_users", {
+                    courseid: args.courseid,
+                }));
+                // Rollen 1:1 aus roles[].shortname pro Nutzer (keine Heuristik). Siehe
+                // enrolled-users.ts zur Kontext-Semantik von core_enrol_get_enrolled_users.
+                const students = data.map(mapEnrolledUser);
+                return { content: [{ type: "text", text: JSON.stringify(students, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_activity_completion": {
+                if (args.userid !== undefined) {
+                    const data = await moodleCall("core_completion_get_activities_completion_status", { courseid: args.courseid, userid: args.userid });
+                    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+                }
+                // Alle eingeschriebenen Schüler abfragen
+                const students = (await moodleCall("core_enrol_get_enrolled_users", {
+                    courseid: args.courseid,
+                }));
+                const results = [];
+                for (const student of students) {
+                    try {
+                        const completion = (await moodleCall("core_completion_get_activities_completion_status", { courseid: args.courseid, userid: student.id }));
+                        results.push({
+                            userid: student.id,
+                            fullname: student.fullname,
+                            username: student.username,
+                            completions: completion.statuses ?? [],
+                        });
+                    }
+                    catch (e) {
+                        results.push({
+                            userid: student.id,
+                            fullname: student.fullname,
+                            error: e.message,
+                        });
+                    }
+                }
+                return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_assignment_submissions": {
+                const submParams = {
+                    assignmentids: args.assignmentids,
+                };
+                if (args.status)
+                    submParams.status = args.status;
+                // Fetch submissions and grades in parallel; both use numeric userid as key,
+                // which is never replaced by the pseudonymisation layer (only names/emails are).
+                const [submData, gradesData] = await Promise.all([
+                    moodleCall("mod_assign_get_submissions", submParams),
+                    moodleCall("mod_assign_get_grades", { assignmentids: args.assignmentids }),
+                ]);
+                const submResult = submData;
+                const gradeResult = gradesData;
+                // Build lookup: assignmentid → Map<userid, {grade, grade_timemodified}>
+                const gradesByAssign = new Map();
+                for (const a of gradeResult.assignments ?? []) {
+                    const gradeMap = new Map();
+                    for (const g of a.grades ?? []) {
+                        gradeMap.set(g.userid, {
+                            grade: g.grade !== undefined ? g.grade : null,
+                            grade_timemodified: typeof g.timemodified === "number" ? g.timemodified : null,
+                        });
+                    }
+                    gradesByAssign.set(a.assignmentid, gradeMap);
+                }
+                // Join grades into submissions – userid stays numeric, mapping is safe
+                const enriched = {
+                    ...submResult,
+                    assignments: (submResult.assignments ?? []).map((a) => {
+                        const gradeMap = gradesByAssign.get(a.assignmentid) ?? new Map();
+                        return {
+                            ...a,
+                            submissions: (a.submissions ?? []).map((s) => {
+                                const g = gradeMap.get(s.userid);
+                                return {
+                                    ...s,
+                                    grade: g?.grade ?? null,
+                                    grade_timemodified: g?.grade_timemodified ?? null,
+                                };
+                            }),
+                        };
+                    }),
+                };
+                return { content: [{ type: "text", text: JSON.stringify(enriched, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_submission_details": {
+                const [submissionsRaw, gradesRaw] = await Promise.all([
+                    moodleCall("mod_assign_get_submissions", {
+                        assignmentids: [args.assignid],
+                    }),
+                    moodleCall("mod_assign_get_grades", {
+                        assignmentids: [args.assignid],
+                    }),
+                ]);
+                const submData = submissionsRaw;
+                const gradeData = gradesRaw;
+                const submission = submData.assignments?.[0]?.submissions?.find((s) => s.userid === args.userid);
+                const grade = gradeData.assignments?.[0]?.grades?.find((g) => g.userid === args.userid);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({ submission: submission ?? null, grade: grade ?? null }, null, 2),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_grade_assignment": {
+                await moodleCall("mod_assign_save_grade", {
+                    assignmentid: args.assignid,
+                    userid: args.userid,
+                    grade: args.grade,
+                    attemptnumber: -1,
+                    addattempt: 0,
+                    workflowstate: args.workflowstate ?? "",
+                    applytoall: 0,
+                    plugindata: {
+                        assignfeedbackcomments_editor: {
+                            text: rehydrateText(String(args.feedback ?? "")),
+                            format: 1, // HTML
+                        },
+                    },
+                });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `✓ Bewertung gespeichert: Note ${args.grade} für Nutzer ${args.userid} (Aufgabe ${args.assignid})`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_grade_assignments_batch": {
+                const grades = args.grades ?? [];
+                const results = [];
+                const buildGradeRecord = (g) => ({
+                    userid: g.userid,
+                    grade: g.grade,
+                    attemptnumber: -1,
+                    addattempt: 0,
+                    workflowstate: g.workflowstate ?? "released",
+                    plugindata: {
+                        assignfeedbackcomments_editor: {
+                            text: rehydrateText(String(g.feedback ?? "")),
+                            format: 1, // HTML
+                        },
+                    },
+                });
+                try {
+                    // Single batch call – saves the entire class in one round-trip
+                    await moodleCall("mod_assign_save_grades", {
+                        assignmentid: args.assignid,
+                        applytoall: 0,
+                        grades: grades.map(buildGradeRecord),
+                    });
+                    for (const g of grades)
+                        results.push({ userid: g.userid, ok: true });
+                }
+                catch (batchErr) {
+                    // Batch failed – fall back to individual saves to isolate which entry failed
+                    await Promise.all(grades.map(async (g) => {
+                        try {
+                            await moodleCall("mod_assign_save_grade", {
+                                assignmentid: args.assignid,
+                                userid: g.userid,
+                                grade: g.grade,
+                                attemptnumber: -1,
+                                addattempt: 0,
+                                workflowstate: g.workflowstate ?? "released",
+                                applytoall: 0,
+                                plugindata: {
+                                    assignfeedbackcomments_editor: {
+                                        text: rehydrateText(String(g.feedback ?? "")),
+                                        format: 1,
+                                    },
+                                },
+                            });
+                            results.push({ userid: g.userid, ok: true });
+                        }
+                        catch (singleErr) {
+                            results.push({
+                                userid: g.userid,
+                                ok: false,
+                                error: singleErr.message,
+                            });
+                        }
+                    }));
+                }
+                const okCount = results.filter((r) => r.ok).length;
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                summary: `${okCount}/${grades.length} Bewertungen gespeichert`,
+                                results,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_download_all_submissions": {
+                // Step 1: fetch all submissions to extract file URLs + userid mapping.
+                // userid is a number and is NOT replaced by pseudonymisation, so the
+                // userid↔file-bytes binding is preserved throughout.
+                const filterStatus = args.status ?? "submitted";
+                const submData = (await moodleCall("mod_assign_get_submissions", {
+                    assignmentids: [args.assignid],
+                    ...(filterStatus ? { status: filterStatus } : {}),
+                }));
+                const toDownload = [];
+                for (const sub of submData.assignments?.[0]?.submissions ?? []) {
+                    const filePlugin = sub.plugins?.find((p) => p.type === "file");
+                    const files = filePlugin?.fileareas?.find((a) => a.area === "submission_files")?.files ?? [];
+                    for (const f of files) {
+                        toDownload.push({
+                            userid: sub.userid, // numeric key – safe from pseudonymisation
+                            filename: f.filename,
+                            fileurl: f.fileurl,
+                            mimetype: f.mimetype ?? "application/octet-stream",
+                            filesize: f.filesize,
+                        });
+                    }
+                }
+                if (toDownload.length === 0) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({ message: "Keine Dateien gefunden.", files: [] }, null, 2),
+                            },
+                        ],
+                    };
+                }
+                // Step 2: extrahierbare Dateien parallel laden und in Text wandeln.
+                // Bilder/Binärdateien werden gar nicht erst geladen – nur Metadaten.
+                // KEIN Base64 in der Antwort: unlesbar fürs Modell und sprengt das
+                // Token-Limit des Clients.
+                const extracted = await Promise.all(toDownload.map(async (entry) => {
+                    const meta = {
+                        userid: entry.userid,
+                        filename: entry.filename,
+                        mimetype: entry.mimetype,
+                        size_bytes: entry.filesize,
+                        fileurl: entry.fileurl,
+                    };
+                    const kind = extractKind(entry.filename, entry.mimetype);
+                    if (!kind) {
+                        return {
+                            ...meta,
+                            ok: true,
+                            note: "Kein Text extrahierbar – einzeln mit moodle_download_submission_file laden.",
+                        };
+                    }
+                    try {
+                        const resp = await fetch(`${entry.fileurl}?token=${MOODLE_TOKEN}`);
+                        if (!resp.ok)
+                            return { ...meta, ok: false, error: `HTTP ${resp.status}` };
+                        const buffer = Buffer.from(await resp.arrayBuffer());
+                        const text = await extractByKind(kind, buffer);
+                        return { ...meta, size_bytes: buffer.byteLength, ok: true, text };
+                    }
+                    catch (e) {
+                        return { ...meta, ok: false, error: e.message };
+                    }
+                }));
+                // Step 3: Größenlimit anwenden – pro Datei und für die Gesamtantwort.
+                let budget = MAX_BATCH_TEXT_CHARS;
+                let skipped = 0;
+                const files = extracted.map((f) => {
+                    if (!("text" in f) || f.text === undefined)
+                        return f;
+                    const { text, ...rest } = f;
+                    if (budget <= 0) {
+                        skipped++;
+                        return {
+                            ...rest,
+                            skipped: true,
+                            note: "Gesamtlimit erreicht – einzeln mit moodle_download_submission_file laden.",
+                        };
+                    }
+                    const capped = capText(text, Math.min(MAX_FILE_TEXT_CHARS, budget));
+                    budget -= capped.text.length;
+                    return {
+                        ...rest,
+                        extracted_text: capped.text,
+                        ...(capped.truncated
+                            ? {
+                                truncated: true,
+                                note: "Text gekürzt – vollständig mit moodle_download_submission_file laden.",
+                            }
+                            : {}),
+                    };
+                });
+                const okCount = files.filter((f) => f.ok).length;
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                summary: `${okCount}/${toDownload.length} Dateien verarbeitet` +
+                                    (skipped > 0 ? `, ${skipped} wegen Größenlimit ohne Text` : ""),
+                                files,
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_quiz_results": {
+                if (args.userid !== undefined) {
+                    // Einzelner Schüler – alle Versuche
+                    const data = await moodleCall("mod_quiz_get_user_attempts", {
+                        quizid: args.quizid,
+                        userid: args.userid,
+                        status: args.status ?? "all",
+                        includepreviews: 0,
+                    });
+                    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+                }
+                if (args.courseid !== undefined) {
+                    // Alle Schüler – beste Note
+                    const students = (await moodleCall("core_enrol_get_enrolled_users", {
+                        courseid: args.courseid,
+                    }));
+                    const results = [];
+                    for (const student of students) {
+                        try {
+                            const best = await moodleCall("mod_quiz_get_user_best_grade", {
+                                quizid: args.quizid,
+                                userid: student.id,
+                            });
+                            results.push({
+                                userid: student.id,
+                                fullname: student.fullname,
+                                username: student.username,
+                                bestgrade: best,
+                            });
+                        }
+                        catch (e) {
+                            results.push({
+                                userid: student.id,
+                                fullname: student.fullname,
+                                error: e.message,
+                            });
+                        }
+                    }
+                    return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+                }
+                throw new Error("Entweder 'userid' (einzelner Schüler) oder 'courseid' (alle Schüler) muss angegeben werden.");
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_course_grades": {
+                if (args.userid !== undefined) {
+                    const data = await moodleCall("gradereport_user_get_grade_items", {
+                        courseid: args.courseid,
+                        userid: args.userid,
+                    });
+                    return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+                }
+                const students = (await moodleCall("core_enrol_get_enrolled_users", {
+                    courseid: args.courseid,
+                }));
+                const results = [];
+                for (const student of students) {
+                    try {
+                        const grades = (await moodleCall("gradereport_user_get_grade_items", {
+                            courseid: args.courseid,
+                            userid: student.id,
+                        }));
+                        results.push({
+                            userid: student.id,
+                            fullname: student.fullname,
+                            username: student.username,
+                            gradeitems: grades.usergrades?.[0]?.gradeitems ?? [],
+                        });
+                    }
+                    catch (e) {
+                        results.push({
+                            userid: student.id,
+                            fullname: student.fullname,
+                            error: e.message,
+                        });
+                    }
+                }
+                return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_course_modules": {
+                // Filterung an Moodle delegieren: core_course_get_contents rendert sonst
+                // ALLE Module inkl. Datei-/Inhaltslisten des gesamten Kurses – bei großen
+                // Kursen so langsam, dass der MCP-Client vorher mit -32001 abbricht.
+                // - excludecontents=1: keine (ungenutzten) Modul-Inhalte/Dateien laden
+                // - modname=<typ>: serverseitig auf den gewünschten Modultyp beschränken
+                const options = [
+                    { name: "excludecontents", value: 1 },
+                ];
+                if (args.modtype) {
+                    options.push({ name: "modname", value: String(args.modtype) });
+                }
+                const data = (await moodleCall("core_course_get_contents", {
+                    courseid: args.courseid,
+                    options,
+                }));
+                const modules = [];
+                for (const section of data) {
+                    for (const mod of section.modules ?? []) {
+                        const entry = {
+                            cmid: mod.id,
+                            instance: mod.instance,
+                            name: mod.name,
+                            modname: mod.modname,
+                            section: section.section,
+                            sectionname: section.name,
+                            visible: mod.visible,
+                            completion: mod.completion,
+                            completiondata: mod.completiondata,
+                            url: mod.url,
+                        };
+                        if (!args.modtype || mod.modname === args.modtype) {
+                            modules.push(entry);
+                        }
+                    }
+                }
+                return { content: [{ type: "text", text: JSON.stringify(modules, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_assignment_details": {
+                // Schritt 1: courseid + instance (assignid) aus der cmid ermitteln
+                const cm = (await moodleCall("core_course_get_course_module", {
+                    cmid: args.cmid,
+                }));
+                if (cm.cm.modname !== "assign") {
+                    throw new Error(`cmid ${args.cmid} ist kein assign-Modul (${cm.cm.modname}).`);
+                }
+                // Schritt 2: Aufgaben-Details laden und auf diese Aufgabe filtern.
+                // Gecacht pro Kurs, da mod_assign_get_assignments ALLE Aufgaben des Kurses
+                // inkl. gerenderter intro zurückgibt (teuer) – wiederholte Abfragen
+                // verschiedener Aufgaben desselben Kurses treffen so den Cache.
+                const raw = (await moodleCallCached("mod_assign_get_assignments", { courseids: [cm.cm.course] }, ASSIGN_CACHE_TTL_MS));
+                const allAssignments = raw.courses.flatMap((c) => c.assignments);
+                const assignment = allAssignments.find((a) => Number(a.id) === cm.cm.instance);
+                if (!assignment) {
+                    throw new Error(`Aufgabe mit cmid ${args.cmid} nicht gefunden. ` +
+                        `cm.instance=${cm.cm.instance}, cm.course=${cm.cm.course}, ` +
+                        `courses_returned=${raw.courses.length}, ` +
+                        `assignments_returned=${allAssignments.length}, ` +
+                        `ids=[${allAssignments.map((a) => a.id).join(",")}]`);
+                }
+                const result = {
+                    id: assignment.id,
+                    cmid: args.cmid,
+                    courseid: cm.cm.course,
+                    name: assignment.name,
+                    intro: assignment.intro,
+                    introformat: assignment.introformat,
+                    introattachments: assignment.introattachments,
+                    duedate: assignment.duedate,
+                    allowsubmissionsfromdate: assignment.allowsubmissionsfromdate,
+                    cutoffdate: assignment.cutoffdate,
+                    gradingduedate: assignment.gradingduedate,
+                    maxattempts: assignment.maxattempts,
+                    teamsubmission: assignment.teamsubmission,
+                    blindmarking: assignment.blindmarking,
+                    grade: assignment.grade,
+                };
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_assignment_feedback": {
+                const gradesRaw = (await moodleCall("mod_assign_get_grades", {
+                    assignmentids: [args.assignid],
+                }));
+                const gradeEntry = gradesRaw.assignments?.[0]?.grades?.find((g) => g.userid === args.userid);
+                if (!gradeEntry) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify({ message: "Keine Bewertung für diesen Schüler gefunden.", userid: args.userid }, null, 2),
+                            },
+                        ],
+                    };
+                }
+                const feedback = {
+                    userid: gradeEntry.userid,
+                    grade: gradeEntry.grade,
+                    timemodified: gradeEntry.timemodified,
+                    grader: gradeEntry.grader,
+                    comments: gradeEntry.plugins
+                        ?.find((p) => p.type === "comments")
+                        ?.editorfields?.find((f) => f.name === "comments")?.text ?? null,
+                };
+                return { content: [{ type: "text", text: JSON.stringify(feedback, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_submission_content": {
+                const submRaw = (await moodleCall("mod_assign_get_submissions", {
+                    assignmentids: [args.assignid],
+                }));
+                const submission = submRaw.assignments?.[0]?.submissions?.find((s) => s.userid === args.userid);
+                if (!submission) {
+                    return {
+                        content: [{ type: "text", text: `Keine Abgabe für Nutzer ${args.userid} gefunden.` }],
+                    };
+                }
+                // Inline-Text extrahieren (onlinetext-Plugin)
+                const textPlugin = submission.plugins?.find((p) => p.type === "onlinetext");
+                const inlineText = textPlugin?.editorfields?.find((f) => f.name === "onlinetext")?.text ?? null;
+                // Dateiliste extrahieren (file-Plugin)
+                const filePlugin = submission.plugins?.find((p) => p.type === "file");
+                const rawFiles = filePlugin?.fileareas?.find((a) => a.area === "submission_files")?.files ?? [];
+                // Bewusst KEINE URL mit Token: der Token gehört nicht in den
+                // Modell-Kontext, und das Modell soll nicht per Web-Fetch laden.
+                const files = rawFiles.map((f) => ({
+                    filename: f.filename,
+                    filesize: f.filesize,
+                    mimetype: f.mimetype ?? "application/octet-stream",
+                    timemodified: f.timemodified,
+                    fileurl: f.fileurl,
+                }));
+                const result = {
+                    userid: submission.userid,
+                    status: submission.status,
+                    timemodified: submission.timemodified,
+                    attemptnumber: submission.attemptnumber,
+                    inlinetext: inlineText,
+                    files,
+                    hint: files.length > 0
+                        ? "Dateien mit moodle_download_submission_file(fileurl) lesen – die fileurl nicht per Web-Fetch öffnen."
+                        : undefined,
+                };
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_download_submission_file": {
+                const fileUrl = args.fileurl;
+                const filename = args.filename ??
+                    decodeURIComponent(fileUrl.split("?")[0].split("/").pop() ?? "");
+                // Token nur an die eigene Moodle-Instanz schicken
+                if (!fileUrl.startsWith(`${MOODLE_URL}/`)) {
+                    throw new Error(`fileurl gehört nicht zu ${MOODLE_URL} – Download abgelehnt.`);
+                }
+                // Token anfügen falls noch nicht vorhanden
+                const authedUrl = fileUrl.includes("token=")
+                    ? fileUrl
+                    : `${fileUrl}?token=${MOODLE_TOKEN}`;
+                const response = await fetch(authedUrl);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status} beim Laden von ${filename}`);
+                }
+                const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+                const mimeBase = contentType.split(";")[0].trim().toLowerCase();
+                // --- Text, Code, Word, Excel, PDF: Text extrahieren ---
+                const kind = extractKind(filename, mimeBase);
+                if (kind) {
+                    const buffer = Buffer.from(await response.arrayBuffer());
+                    let raw;
+                    let label;
+                    try {
+                        if (kind === "pdf") {
+                            const pdf = await extractPdfText(buffer);
+                            raw = pdf.text;
+                            label = `PDF, ${pdf.pages} Seiten`;
+                        }
+                        else {
+                            raw = await extractByKind(kind, buffer);
+                            label =
+                                kind === "docx" ? "Word-Dokument" : kind === "xlsx" ? "Excel-Tabelle" : mimeBase;
+                        }
+                    }
+                    catch (e) {
+                        throw new Error(`${filename} konnte nicht gelesen werden: ${e.message}`);
+                    }
+                    const { text } = capText(raw, MAX_FILE_TEXT_CHARS);
+                    const hint = kind === "pdf" && raw.trim().replace(/--- Seite \d+ ---/g, "").trim() === ""
+                        ? "\n\n(Kein Text gefunden – vermutlich ein gescanntes PDF ohne Textebene.)"
+                        : "";
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `=== ${filename} (${label}, ${raw.length} Zeichen) ===\n\n${text}${hint}`,
+                            },
+                        ],
+                    };
+                }
+                // --- Bilder ---
+                if (IMAGE_MIMES.has(mimeBase)) {
+                    const buffer = await response.arrayBuffer();
+                    return {
+                        content: [
+                            {
+                                type: "image",
+                                data: Buffer.from(buffer).toString("base64"),
+                                mimeType: mimeBase,
+                            },
+                        ],
+                    };
+                }
+                // --- Sonstige Binärdateien: nur Metadaten, keine URL mit Token ---
+                const buffer = await response.arrayBuffer();
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: [
+                                `Datei: ${filename}`,
+                                `MIME-Typ: ${mimeBase}`,
+                                `Größe: ${buffer.byteLength} Bytes`,
+                                "",
+                                "Diese Datei kann nicht automatisch angezeigt werden.",
+                                "Bitte die Lehrkraft, sie direkt in Moodle zu öffnen.",
+                            ].join("\n"),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_messages": {
+                // Moodle 4.x: Direktnachrichten sind nur über die Konversations-API
+                // zuverlässig abrufbar. core_message_get_messages liefert in neueren
+                // Versionen keine Ergebnisse mehr für Direktnachrichten.
+                const convParams = {
+                    userid: args.userid,
+                    type: 1, // 1 = Einzelgespräche
+                    limitfrom: args.offset ?? 0,
+                    limitnum: args.limit ?? 50,
+                };
+                const convData = (await moodleCall("core_message_get_conversations", convParams));
+                let conversations = convData.conversations ?? [];
+                // Filter: nur ungelesene wenn read: false übergeben
+                if (args.read === false) {
+                    conversations = conversations.filter((c) => (c.unreadcount ?? 0) > 0);
+                }
+                else if (args.read === true) {
+                    conversations = conversations.filter((c) => c.isread);
+                }
+                // direction: 'received' → Konversationen mit eingehender letzter Nachricht
+                // d.h. letzte Nachricht stammt NICHT von uns selbst
+                const direction = args.direction ?? "received";
+                if (direction === "received") {
+                    conversations = conversations.filter((c) => {
+                        const lastMsg = c.messages?.[0];
+                        return lastMsg && lastMsg.useridfrom !== args.userid;
+                    });
+                }
+                const result = conversations.map((c) => ({
+                    conversationid: c.id,
+                    partner: c.members
+                        ?.filter((m) => m.id !== args.userid)
+                        .map((m) => ({ id: m.id, fullname: m.fullname })),
+                    unreadcount: c.unreadcount ?? 0,
+                    isread: c.isread,
+                    lastmessage: c.messages?.[0]
+                        ? {
+                            from: c.messages[0].useridfrom,
+                            text: c.messages[0].text,
+                            date: new Date(c.messages[0].timecreated * 1000).toISOString(),
+                        }
+                        : null,
+                }));
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${result.length} Konversation(en) mit ${direction === "received" ? "eingegangenen" : "allen"} Nachrichten:\n${JSON.stringify(result, null, 2)}`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_conversations": {
+                const params = {
+                    userid: args.userid,
+                    limitfrom: args.offset ?? 0,
+                    limitnum: args.limit ?? 20,
+                };
+                if (args.type !== undefined)
+                    params.type = args.type;
+                if (args.unread_only)
+                    params.favourites = 0; // Moodle-API-Flag
+                const data = (await moodleCall("core_message_get_conversations", params));
+                const conversations = (data.conversations ?? [])
+                    .filter((c) => !args.unread_only || (c.unreadcount ?? 0) > 0)
+                    .map((c) => ({
+                    id: c.id,
+                    type: c.type === 1 ? "Einzelgespräch" : "Gruppe",
+                    name: c.name,
+                    members: (c.members ?? []).map((m) => ({ id: m.id, fullname: m.fullname })),
+                    unreadcount: c.unreadcount ?? 0,
+                    isread: c.isread,
+                    lastmessage: c.messages?.[0]
+                        ? {
+                            from: c.messages[0].useridfrom,
+                            text: c.messages[0].text,
+                            date: new Date(c.messages[0].timecreated * 1000).toISOString(),
+                        }
+                        : null,
+                }));
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${conversations.length} Konversation(en):\n${JSON.stringify(conversations, null, 2)}`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_get_conversation_with_user": {
+                // Zuerst Konversations-ID zwischen den zwei Nutzern ermitteln
+                const convData = (await moodleCall("core_message_get_conversation_between_users", {
+                    userid: args.userid,
+                    otheruserid: args.otheruserid,
+                    includecontactrequests: 0,
+                    includeprivacyinfo: 0,
+                }));
+                if (!convData || !convData.id) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Keine Konversation zwischen Nutzer ${args.userid} und ${args.otheruserid} gefunden.`,
+                            },
+                        ],
+                    };
+                }
+                // Nachrichten der Konversation laden
+                const msgData = (await moodleCall("core_message_get_conversation_messages", {
+                    currentuserid: args.userid,
+                    convid: convData.id,
+                    limitfrom: args.offset ?? 0,
+                    limitnum: args.limit ?? 100,
+                    newest: 0, // älteste zuerst = chronologisch
+                }));
+                const memberMap = new Map((msgData.members ?? []).map((m) => [m.id, m.fullname]));
+                const messages = (msgData.messages ?? []).map((m) => ({
+                    id: m.id,
+                    from: m.useridfrom,
+                    fromName: memberMap.get(m.useridfrom) ?? `Nutzer ${m.useridfrom}`,
+                    text: m.text,
+                    date: new Date(m.timecreated * 1000).toISOString(),
+                }));
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Konversation (ID ${convData.id}) – ${messages.length} Nachricht(en):\n${JSON.stringify(messages, null, 2)}`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_send_message": {
+                const textFormat = args.format ?? 1;
+                const subject = args.subject ? rehydrateText(String(args.subject)) : undefined;
+                const buildText = (msg) => subject ? `<strong>${subject}</strong><br>${msg}` : msg;
+                const messages = args.userids.map((uid, index) => ({
+                    touserid: uid,
+                    text: buildText(rehydrateText(String(args.message ?? ""))),
+                    textformat: textFormat,
+                    clientmsgid: `msg-${Date.now()}-${index}`,
+                }));
+                const results = (await moodleCall("core_message_send_instant_messages", { messages }));
+                const summary = results.map((r, i) => ({
+                    userid: args.userids[i],
+                    msgid: r.msgid,
+                    success: !r.errormessage,
+                    error: r.errormessage ?? null,
+                }));
+                const sent = summary.filter((s) => s.success).length;
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${sent}/${summary.length} Nachrichten erfolgreich gesendet.\n${JSON.stringify(summary, null, 2)}`,
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_send_message_to_course": {
+                const textFormat = args.format ?? 1;
+                const subject = args.subject ? rehydrateText(String(args.subject)) : undefined;
+                const buildText = (msg) => subject ? `<strong>${subject}</strong><br>${msg}` : msg;
+                // Alle Schüler des Kurses laden
+                const students = (await moodleCall("core_enrol_get_enrolled_users", {
+                    courseid: args.courseid,
+                }));
+                if (students.length === 0) {
+                    return {
+                        content: [{ type: "text", text: "Keine Schüler im Kurs gefunden." }],
+                    };
+                }
+                // In Batches à 50 senden (Moodle-Limit)
+                const BATCH = 50;
+                const allResults = [];
+                for (let i = 0; i < students.length; i += BATCH) {
+                    const batch = students.slice(i, i + BATCH);
+                    const messages = batch.map((s, j) => ({
+                        touserid: s.id,
+                        text: buildText(rehydrateText(String(args.message ?? ""))),
+                        textformat: textFormat,
+                        clientmsgid: `bulk-${Date.now()}-${i + j}`,
+                    }));
+                    const results = (await moodleCall("core_message_send_instant_messages", { messages }));
+                    results.forEach((r, j) => {
+                        allResults.push({
+                            userid: batch[j].id,
+                            fullname: batch[j].fullname,
+                            success: !r.errormessage,
+                            error: r.errormessage ?? null,
+                        });
+                    });
+                }
+                const sent = allResults.filter((r) => r.success).length;
+                const failed = allResults.filter((r) => !r.success);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${sent}/${allResults.length} Nachrichten gesendet.` +
+                                (failed.length > 0
+                                    ? `\n\nFehlgeschlagen:\n${JSON.stringify(failed, null, 2)}`
+                                    : ""),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            // ------------------------------------------------------------------
+            case "moodle_resolve_student": {
+                // Optional Roster laden, damit die lokale Zuordnung sicher gefuellt ist
+                if (args.courseid !== undefined) {
+                    try {
+                        await moodleCall("core_enrol_get_enrolled_users", { courseid: args.courseid });
+                    }
+                    catch {
+                        // ignorieren - dann nur aus vorhandener Zuordnung aufloesen
+                    }
+                }
+                const matches = resolveStudent(String(args.query ?? ""));
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({ query: args.query ?? "", matches }, null, 2),
+                        },
+                    ],
+                };
+            }
+            // ------------------------------------------------------------------
+            case "moodle_rehydrate_report": {
+                const infile = args.infile;
+                const outfile = args.outfile;
+                const rawField = args.field ?? "fullname";
+                const field = (["fullname", "email", "username"].includes(rawField)
+                    ? rawField
+                    : "fullname");
+                try {
+                    const result = await rehydrateFile(infile, outfile, field);
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+                    };
+                }
+                catch (e) {
+                    if (e instanceof RehydrateError) {
+                        return {
+                            content: [{ type: "text", text: `Fehler bei Rehydrierung: ${e.message}` }],
+                            isError: true,
+                        };
+                    }
+                    throw e;
+                }
+            }
+            // ------------------------------------------------------------------
+            case "moodle_list_cohorts": {
+                const includeMembers = args.include_members !== false; // Standard: true
+                const filterIds = args.cohortids ?? [];
+                // Alle Kohorten abrufen (gefiltert oder alle)
+                const cohortsRaw = (await moodleCall("core_cohort_get_cohorts", {
+                    cohortids: filterIds,
+                }));
+                const cohorts = [];
+                for (const c of cohortsRaw) {
+                    const entry = {
+                        id: c.id,
+                        name: c.name,
+                        idnumber: c.idnumber ?? "",
+                        contextid: c.contextid,
+                        description: c.description?.replace(/<[^>]*>/g, "").trim() ?? "",
+                        visible: c.visible === 1,
+                    };
+                    if (includeMembers) {
+                        try {
+                            const memberData = (await moodleCall("core_cohort_get_cohort_members", {
+                                cohortids: [c.id],
+                            }));
+                            const userids = memberData[0]?.userids ?? [];
+                            entry.member_count = userids.length;
+                            entry.members = userids.map((uid) => ({
+                                userid: uid,
+                                pseudonym: pseudonymForUser(uid),
+                            }));
+                        }
+                        catch {
+                            // Kohorte nicht zugänglich oder Funktion nicht im Service aktiviert
+                            entry.member_count = 0;
+                            entry.members = [];
+                        }
+                    }
+                    cohorts.push(entry);
+                }
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                total_cohorts: cohorts.length,
+                                cohorts,
+                                ...(includeMembers
+                                    ? {}
+                                    : { note: "Mitglieder wurden nicht geladen (include_members=false)." }),
+                            }, null, 2),
+                        },
+                    ],
+                };
+            }
+            default:
+                throw new Error(`Unbekanntes Tool: ${name}`);
+        }
+    }
+    catch (error) {
+        return {
+            content: [{ type: "text", text: `Fehler: ${error.message}` }],
+            isError: true,
+        };
+    }
+};
+// Zentraler Pseudonymisierungs-Punkt: Jedes Tool-Ergebnis durchläuft die
+// Redaktion, bevor es den Server (und damit die lokale Umgebung) verlässt.
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const result = await handleToolCall(request);
+    return redactResult(result);
+});
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+const transport = new StdioServerTransport();
+await server.connect(transport);

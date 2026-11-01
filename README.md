@@ -137,16 +137,22 @@ Scheduled Task (täglich / wöchentlich / alle 30 Min.)
         └─ Fan-out ──────► moodle-nachrichten-beantworter
 ```
 
-**Voraussetzung:** der MCP-Server [moodle-agent-mcp](https://github.com/jtuttas/moodle-agent-mcp),
-registriert unter dem Namen `moodle-agent`. Er pseudonymisiert alle Schülerdaten **bevor** sie das
-Modell erreichen (`S-0001 …`) und setzt die Vornamen erst beim Versand lokal wieder ein.
+**MCP-Server inklusive:** Das Plugin bringt den Server
+[moodle-agent-mcp](https://github.com/jtuttas/moodle-agent-mcp) (v1.0.2) als MCPB-Paket mit. Er
+pseudonymisiert alle Schülerdaten, **bevor** sie das Modell erreichen (`S-0001 …`), und setzt die
+Vornamen erst beim Versand lokal wieder ein.
 
-**Einrichtung:**
-1. MCP-Server installieren und als `moodle-agent` registrieren
-2. Plugin installieren, einen leeren Arbeitsordner öffnen
-3. `/moodletutor:setup-moodletutor` – legt `tutor-config.md` (Signatur, Lehrer-userid, Moodle-URL),
-   `CLAUDE.md` und die erste `Kurs_<id>_*.md` an
-4. Erst von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`
+**Einrichtung (Claude Code – Terminal oder Code-Tab der Desktop-App):**
+1. Plugin installieren. Im Dialog **Moodle-URL** und **API-Token** eintragen
+   (später änderbar: `/plugin` → Installed → `moodletutor` → Configure). Der Token wird im
+   sicheren Speicher abgelegt, nicht in einer Datei.
+2. Einen leeren Arbeitsordner öffnen und `/moodletutor:setup-moodletutor` ausführen – legt
+   `tutor-config.md` (Signatur, Lehrer-userid), `CLAUDE.md` und die erste `Kurs_<id>_*.md` an
+3. Erst von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`
+
+**Andere Umgebungen (z. B. Cowork):** Den Server dort separat als
+[Erweiterung](https://github.com/jtuttas/moodle-agent-mcp#ein-klick-installation-per-mcpb-empfohlen)
+installieren. Die Agenten erkennen beide Varianten. Nicht beide gleichzeitig aktiv lassen.
 
 **Achtung:** Die Agenten schreiben Noten und senden Nachrichten an echte Schülerinnen und Schüler.
 Zum Ausprobieren einen Testkurs mit Testkonten verwenden.

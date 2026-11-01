@@ -10,12 +10,22 @@ Dateien; frage nach, falls `tutor-config.md` oder `CLAUDE.md` schon existieren.
 
 ## Schritt 1 – Voraussetzung prüfen: MCP-Server
 
-Prüfe, ob Tools mit dem Präfix `mcp__moodle-agent__` verfügbar sind (z. B. `moodle_get_course_info`).
-Die Agenten dieses Plugins erwarten genau diesen Servernamen.
+Das Plugin bringt den MCP-Server `moodle-agent-mcp` als MCPB-Paket mit. Prüfe, ob Moodle-Tools
+verfügbar sind – in einer dieser beiden Namensformen (die Agenten akzeptieren beide):
+- `mcp__plugin_moodletutor_moodle-agent-mcp__…` → Server aus diesem Plugin
+- `mcp__moodle-agent__…` → separat installierter Server (z. B. Claude-Desktop-Erweiterung)
 
-Fehlen sie: Brich ab und verweise auf die Installation des Servers
-<https://github.com/jtuttas/moodle-agent-mcp> (Server unter dem Namen `moodle-agent` registrieren,
-`REDACT_PII` eingeschaltet lassen). Ohne diesen Server arbeitet keiner der Agenten.
+Sind **beide** aktiv, darauf hinweisen und empfehlen, einen davon zu deaktivieren (beide nutzen
+standardmäßig dieselbe Zuordnungsdatei `~/MoodleAgent/pseudonym-map.json`).
+
+Fehlen sie ganz:
+- **Claude Code (Terminal oder Code-Tab der Desktop-App):** `/plugin` → Installed → `moodletutor` →
+  **Configure** → Moodle-URL und API-Token eintragen. Pseudonymisierung eingeschaltet lassen.
+  Danach `/reload-plugins` bzw. neue Sitzung.
+- **Andere Umgebungen (z. B. Cowork):** Server separat als Erweiterung installieren:
+  <https://github.com/jtuttas/moodle-agent-mcp> (Abschnitt „Ein-Klick-Installation per MCPB").
+
+Ohne Moodle-Tools arbeitet keiner der Agenten – dann hier abbrechen.
 
 ## Schritt 2 – Angaben der Lehrkraft erfragen
 

@@ -14,7 +14,7 @@ Dieser Skill registriert die drei Hintergrund-Agenten als Scheduled Tasks. Die e
 
 ## Voraussetzungen (vorher prüfen, nicht automatisch erledigen)
 1. Der MoodleTutor-Arbeitsordner ist in Claude geöffnet/verbunden und mit `moodletutor:setup-moodletutor` eingerichtet (`tutor-config.md` vorhanden).
-2. MCP-Server `moodle-agent` ist registriert (Tools `mcp__moodle-agent__*` sichtbar) – siehe https://github.com/jtuttas/moodle-agent-mcp.
+2. Moodle-Tools sind verfügbar (`mcp__plugin_moodletutor_moodle-agent-mcp__*` aus dem Plugin oder `mcp__moodle-agent__*` aus einer separaten Installation) – siehe Skill `moodletutor:setup-moodletutor`, Schritt 1.
 3. Mindestens eine `Kurs_<id>_*.md`-Datei existiert im Projektordner.
 
 Sind 1–3 nicht erfüllt, den Benutzer darauf hinweisen und erst danach fortfahren.
