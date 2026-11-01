@@ -22,8 +22,17 @@ claude plugin install moodletutor@fobi-agenten
 Ohne GitHub (ZIP entpacken): statt `jtuttas/fobi-agenten` den Pfad
 `./fobi-agenten` angeben.
 
-**Claude-App (Cowork)**: Die Dateien `redaktion.plugin` und
-`klassenarbeit.plugin` aus dem Moodle-Kurs im Chat öffnen und übernehmen.
+Für `moodletutor` fragt die Shell-Installation Moodle-URL und Token **nicht** ab. Danach in einer
+Sitzung `/plugin` → Installed → `moodletutor` → **Configure** aufrufen – oder gleich in der Sitzung
+installieren: `/plugin install moodletutor@fobi-agenten` (öffnet den Dialog).
+
+**Claude-Desktop-App, Tab Code** (lokale Sitzung): einmal
+`/plugin marketplace add jtuttas/fobi-agenten` eingeben, dann **+** neben dem Eingabefeld →
+**Plugins** → **Add plugin** → Plugin wählen.
+
+**Claude-App (Cowork)**: Die Dateien `redaktion.plugin`, `klassenarbeit.plugin` und
+`moodletutor.plugin` aus dem Moodle-Kurs im Chat öffnen und übernehmen. Für `moodletutor` den
+MCP-Server zusätzlich separat installieren (siehe unten).
 
 ---
 
@@ -143,9 +152,9 @@ pseudonymisiert alle Schülerdaten, **bevor** sie das Modell erreichen (`S-0001 
 Vornamen erst beim Versand lokal wieder ein.
 
 **Einrichtung (Claude Code – Terminal oder Code-Tab der Desktop-App):**
-1. Plugin installieren. Im Dialog **Moodle-URL** und **API-Token** eintragen
-   (später änderbar: `/plugin` → Installed → `moodletutor` → Configure). Der Token wird im
-   sicheren Speicher abgelegt, nicht in einer Datei.
+1. Plugin installieren und **Moodle-URL** und **API-Token** eintragen: Der Dialog erscheint bei
+   Installation über `/plugin`, sonst `/plugin` → Installed → `moodletutor` → Configure.
+   Der Token wird im sicheren Speicher abgelegt, nicht in einer Datei. Danach `/reload-plugins`.
 2. Einen leeren Arbeitsordner öffnen und `/moodletutor:setup-moodletutor` ausführen – legt
    `tutor-config.md` (Signatur, Lehrer-userid), `CLAUDE.md` und die erste `Kurs_<id>_*.md` an
 3. Erst von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`
