@@ -169,6 +169,12 @@ Vornamen erst beim Versand lokal wieder ein.
 [Erweiterung](https://github.com/jtuttas/moodle-agent-mcp#ein-klick-installation-per-mcpb-empfohlen)
 installieren. Die Agenten erkennen beide Varianten. Nicht beide gleichzeitig aktiv lassen.
 
+**Empfohlene Betriebsart:** eine **lokale** Sitzung – Code-Tab der Desktop-App oder Terminal –
+mit dem Arbeitsordner auf dem eigenen Rechner. Das gilt besonders für die Scheduled Tasks.
+In einer Cloud-Sitzung, die nur über die Geräte-Brücke mit dem Rechner verbunden ist, heißen die
+Moodle-Tools anders (`mcp__remote-devices__moodle-agent__…`) und die Dateien liegen nicht im
+Arbeitsverzeichnis. Die Agenten kommen damit zurecht, sind dort aber langsamer.
+
 **Achtung:** Die Agenten schreiben Noten und senden Nachrichten an echte Schülerinnen und Schüler.
 Zum Ausprobieren einen Testkurs mit Testkonten verwenden.
 

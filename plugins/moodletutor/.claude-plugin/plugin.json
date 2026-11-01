@@ -1,7 +1,7 @@
 {
   "name": "moodletutor",
   "description": "KI-Tutor für Moodle-Kurse: Abgaben bewerten, Lernfortschritt begleiten, Schülernachrichten beantworten – als Multi-Agenten-System mit Pseudonymisierung über den MCP-Server moodle-agent",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": {
     "name": "Jörg Tuttas",
     "email": "tuttas@mmbbs.de"

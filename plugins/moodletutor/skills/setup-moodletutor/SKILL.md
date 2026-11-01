@@ -11,9 +11,10 @@ Dateien; frage nach, falls `tutor-config.md` oder `CLAUDE.md` schon existieren.
 ## Schritt 1 – Voraussetzung prüfen: MCP-Server
 
 Das Plugin bringt den MCP-Server `moodle-agent-mcp` als MCPB-Paket mit. Prüfe, ob Moodle-Tools
-verfügbar sind – in einer dieser beiden Namensformen (die Agenten akzeptieren beide):
+verfügbar sind – in einer dieser Namensformen (die Agenten erben die Tools ihrer Umgebung und kommen mit allen zurecht):
 - `mcp__plugin_moodletutor_moodle-agent-mcp__…` → Server aus diesem Plugin
 - `mcp__moodle-agent__…` → separat installierter Server (z. B. Claude-Desktop-Erweiterung)
+- `mcp__remote-devices__moodle-agent__…` → lokaler Server, durchgereicht in eine Cloud-Sitzung, die mit dem Rechner verbunden ist
 
 Sind **beide** aktiv, darauf hinweisen und empfehlen, einen davon zu deaktivieren (beide nutzen
 standardmäßig dieselbe Zuordnungsdatei `~/MoodleAgent/pseudonym-map.json`).
