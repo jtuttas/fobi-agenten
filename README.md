@@ -99,14 +99,22 @@ Aufgabenstellung und Musterlösung. Wie viele es sind, verrät die Kursleitung
 erst später.
 
 1. Den Ordner `uebung/klassenarbeit-sql` in einen eigenen Arbeitsordner kopieren
-   und dort Claude starten.
+   und dort Claude starten. **Keine Plugin-Installation nötig:** Der Ordner bringt
+   die beiden Agenten und den Skill in `.claude/` selbst mit.
+   - Claude-Desktop-App: Tab **Code** → lokale Sitzung → diesen Ordner wählen
+   - Terminal: `cd klassenarbeit-sql && claude`
+
+   Hinweis: `.claude` ist ein versteckter Ordner – beim Kopieren unter macOS/Linux
+   mitkopieren (im Explorer/Finder ggf. versteckte Dateien einblenden).
 2. **Selbst prüfen (10 Min.):** Lesen Sie Aufgaben und Musterlösung. Notieren
    Sie alle Fehler, die Sie finden.
 3. **Agent prüfen lassen:**
    `Nutze den loesungs-pruefer für die Klassenarbeit in diesem Ordner.`
 4. **Vergleichen:** Was hat der Agent gefunden, was Sie? Gibt es Fehlalarme?
-5. **Volle Schleife:** In einem neuen, leeren Ordner
-   `/klassenarbeit:klassenarbeit SQL Joins und Gruppierung, 45 Min., 1. Ausbildungsjahr`
+5. **Volle Schleife:** Eine Kopie des Ordners anlegen, darin `aufgaben.md`,
+   `loesung.md` und `datenbank.sql` löschen (`.claude` behalten) und eingeben:
+   `/klassenarbeit SQL Joins und Gruppierung, 45 Min., 1. Ausbildungsjahr`
+   (mit installiertem Plugin: `/klassenarbeit:klassenarbeit …`)
 6. **Reflexion:** Warum darf der Prüfer `loesung.md` erst nach dem eigenen
    Lösen öffnen? Was würde passieren, wenn Autor und Prüfer derselbe Agent wären?
 
