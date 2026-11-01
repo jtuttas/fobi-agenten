@@ -20,11 +20,12 @@ Sind **beide** aktiv, darauf hinweisen und empfehlen, einen davon zu deaktiviere
 standardmäßig dieselbe Zuordnungsdatei `~/MoodleAgent/pseudonym-map.json`).
 
 Fehlen sie ganz:
-- **Claude Code (Terminal oder Code-Tab der Desktop-App):** `/plugin` → Installed → `moodletutor` →
-  **Configure** → Moodle-URL und API-Token eintragen. Pseudonymisierung eingeschaltet lassen.
-  Danach `/reload-plugins` bzw. neue Sitzung.
-- **Andere Umgebungen (z. B. Cowork):** Server separat als Erweiterung installieren:
-  <https://github.com/jtuttas/moodle-agent-mcp> (Abschnitt „Ein-Klick-Installation per MCPB").
+- **Claude-Desktop-App (Cowork oder Tab „Code") – Standardweg:** Server als Erweiterung installieren:
+  <https://github.com/jtuttas/moodle-agent-mcp/releases/latest/download/moodle-agent-mcp.mcpb>
+  doppelklicken bzw. unter Einstellungen → Erweiterungen hineinziehen, Moodle-URL und API-Token
+  eintragen. Der im Plugin eingebettete Server startet in der Desktop-App nicht.
+- **Claude Code im Terminal:** `/plugin` → Installed → `moodletutor` → **Configure** → Moodle-URL und
+  API-Token eintragen, danach `/reload-plugins`.
 
 Ohne Moodle-Tools arbeitet keiner der Agenten – dann hier abbrechen.
 

@@ -22,17 +22,16 @@ claude plugin install moodletutor@fobi-agenten
 Ohne GitHub (ZIP entpacken): statt `jtuttas/fobi-agenten` den Pfad
 `./fobi-agenten` angeben.
 
-Für `moodletutor` fragt die Shell-Installation Moodle-URL und Token **nicht** ab. Danach in einer
-Sitzung `/plugin` → Installed → `moodletutor` → **Configure** aufrufen – oder gleich in der Sitzung
-installieren: `/plugin install moodletutor@fobi-agenten` (öffnet den Dialog).
+Für `moodletutor` zusätzlich den MCP-Server einrichten – siehe Abschnitt „Plugin moodletutor".
 
 **Claude-Desktop-App, Tab Code** (lokale Sitzung): einmal
 `/plugin marketplace add jtuttas/fobi-agenten` eingeben, dann **+** neben dem Eingabefeld →
 **Plugins** → **Add plugin** → Plugin wählen.
 
 **Claude-App (Cowork)**: Die Dateien `redaktion.plugin`, `klassenarbeit.plugin` und
-`moodletutor.plugin` aus dem Moodle-Kurs im Chat öffnen und übernehmen. Für `moodletutor` den
-MCP-Server zusätzlich separat installieren (siehe unten).
+`moodletutor.plugin` aus dem Moodle-Kurs im Chat öffnen und übernehmen – oder über *Anpassen →
+Plugins → Marketplace hinzufügen* mit `https://github.com/jtuttas/fobi-agenten`. Für `moodletutor`
+den MCP-Server zusätzlich als Erweiterung installieren (siehe unten).
 
 ---
 
@@ -152,22 +151,28 @@ Scheduled Task (täglich / wöchentlich / alle 30 Min.)
         └─ Fan-out ──────► moodle-nachrichten-beantworter
 ```
 
-**MCP-Server inklusive:** Das Plugin bringt den Server
-[moodle-agent-mcp](https://github.com/jtuttas/moodle-agent-mcp) (v1.0.2) als MCPB-Paket mit. Er
-pseudonymisiert alle Schülerdaten, **bevor** sie das Modell erreichen (`S-0001 …`), und setzt die
-Vornamen erst beim Versand lokal wieder ein.
+**Zweiter MCP-Server:** Die Agenten brauchen den Server
+[moodle-agent-mcp](https://github.com/jtuttas/moodle-agent-mcp). Er pseudonymisiert alle
+Schülerdaten, **bevor** sie das Modell erreichen (`S-0001 …`), und setzt die Vornamen erst beim
+Versand lokal wieder ein.
 
-**Einrichtung (Claude Code – Terminal oder Code-Tab der Desktop-App):**
-1. Plugin installieren und **Moodle-URL** und **API-Token** eintragen: Der Dialog erscheint bei
-   Installation über `/plugin`, sonst `/plugin` → Installed → `moodletutor` → Configure.
-   Der Token wird im sicheren Speicher abgelegt, nicht in einer Datei. Danach `/reload-plugins`.
-2. Einen leeren Arbeitsordner öffnen und `/moodletutor:setup-moodletutor` ausführen – legt
-   `tutor-config.md` (Signatur, Lehrer-userid), `CLAUDE.md` und die erste `Kurs_<id>_*.md` an
-3. Erst von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`
+**Einrichtung – zwei Schritte (Claude-Desktop-App, Cowork oder Tab „Code"):**
+1. **MCP-Server als Erweiterung:**
+   [`moodle-agent-mcp.mcpb`](https://github.com/jtuttas/moodle-agent-mcp/releases/latest/download/moodle-agent-mcp.mcpb)
+   herunterladen und doppelklicken bzw. unter **Einstellungen → Erweiterungen** hineinziehen.
+   **Moodle-URL** und **API-Token** eintragen, Pseudonymisierung eingeschaltet lassen.
+2. **Plugin `moodletutor` installieren:** Cowork über *Anpassen → Plugins*, im Tab „Code" mit
+   `/plugin install moodletutor@fobi-agenten`.
 
-**Andere Umgebungen (z. B. Cowork):** Den Server dort separat als
-[Erweiterung](https://github.com/jtuttas/moodle-agent-mcp#ein-klick-installation-per-mcpb-empfohlen)
-installieren. Die Agenten erkennen beide Varianten. Nicht beide gleichzeitig aktiv lassen.
+Danach einen leeren Arbeitsordner öffnen und `/moodletutor:setup-moodletutor` ausführen. Das legt
+`tutor-config.md` (Signatur, Lehrer-userid), `CLAUDE.md` und die erste `Kurs_<id>_*.md` an. Erst
+von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`.
+
+**Eingebetteter Server (nur Claude Code im Terminal):** Das Plugin enthält den Server zusätzlich
+als MCPB-Paket (v1.0.2). Die Desktop-App startet ihn nicht, weil sie dessen Konfiguration nicht
+abfragen kann (`user_config_unsupported`). Im Terminal: nach der Installation `/plugin` →
+Installed → `moodletutor` → **Configure** → URL und Token eintragen. Die Agenten erkennen jede
+Variante. Nicht zwei Server gleichzeitig aktiv lassen – beide nutzen dieselbe Zuordnungsdatei.
 
 **Empfohlene Betriebsart:** eine **lokale** Sitzung – Code-Tab der Desktop-App oder Terminal –
 mit dem Arbeitsordner auf dem eigenen Rechner. Das gilt besonders für die Scheduled Tasks.
