@@ -1,0 +1,49 @@
+---
+name: setup-moodletutor
+description: Richtet einen MoodleTutor-Arbeitsordner ein (tutor-config.md, CLAUDE.md, Kursvorlage, Ordner für Lernprotokolle und Berichte) und prüft den MCP-Server moodle-agent. Verwenden bei "MoodleTutor einrichten", "setup moodletutor", "Tutor-Arbeitsordner anlegen" oder wenn tutor-config.md fehlt.
+---
+
+# Setup: MoodleTutor-Arbeitsordner
+
+Richte den aktuell geöffneten Ordner als MoodleTutor-Arbeitsordner ein. Überschreibe keine bestehenden
+Dateien; frage nach, falls `tutor-config.md` oder `CLAUDE.md` schon existieren.
+
+## Schritt 1 – Voraussetzung prüfen: MCP-Server
+
+Prüfe, ob Tools mit dem Präfix `mcp__moodle-agent__` verfügbar sind (z. B. `moodle_get_course_info`).
+Die Agenten dieses Plugins erwarten genau diesen Servernamen.
+
+Fehlen sie: Brich ab und verweise auf die Installation des Servers
+<https://github.com/jtuttas/moodle-agent-mcp> (Server unter dem Namen `moodle-agent` registrieren,
+`REDACT_PII` eingeschaltet lassen). Ohne diesen Server arbeitet keiner der Agenten.
+
+## Schritt 2 – Angaben der Lehrkraft erfragen
+
+Frage in einer Rückfrage ab:
+1. **Signatur** für Nachrichten und Feedback, z. B. „Erika Muster"
+2. **Prüfende Lehrkraft** für Berichte, z. B. „Erika Muster (MU), BBS Musterstadt"
+3. **Moodle-Basis-URL**, z. B. `https://moodle.example.de/`
+4. **Lehrer-Account-userid** in Moodle – falls unbekannt: über `moodle_get_conversations` bzw. eigene
+   Profildaten ermitteln oder die Lehrkraft im Moodle-Profil nachsehen lassen (Zahl in der Profil-URL `id=`)
+
+## Schritt 3 – Dateien anlegen
+
+1. `tutor-config.md` aus `references/tutor-config.template.md` mit den Angaben aus Schritt 2
+2. `CLAUDE.md` aus `references/CLAUDE.template.md` (unverändert übernehmen)
+3. `Kurs_VORLAGE.md.example` aus `references/Kurs_VORLAGE.md.example`, Moodle-URL einsetzen
+4. Leere Dateien/Ordner: `Lernprotokolle/`, `Berichte/`, `Bewertungs-Log.md` mit Kopfzeile
+   `Datum | Kurs | Aufgabe (assignid) | Schüler-userid | Note | Kommentar`
+5. `.gitignore` mit: `Lernprotokolle/`, `Berichte/`, `Bewertungs-Log.md`, `Lernfortschritt_Kurs_*.md`,
+   `Kurs_*.md`, `!Kurs_VORLAGE.md.example`
+
+## Schritt 4 – Ersten Kurs aktivieren
+
+Frage nach der Moodle-Kurs-ID. Rufe `moodle_get_course_info(courseid)` und
+`moodle_get_course_modules(courseid)` auf und erzeuge daraus `Kurs_<id>_<Kurzname>.md` nach der Vorlage
+(Lernsituationen, Phasen, cmids). Nur Kurse mit einer solchen Datei werden von den Agenten bearbeitet.
+
+## Schritt 5 – Abschluss
+
+Zeige eine kurze Übersicht der angelegten Dateien und nenne die nächsten Schritte:
+- Testlauf von Hand: „Bewerte neue Abgaben" (Skill `moodle-abgaben-feedback`)
+- Automatik einrichten: Skill `moodletutor:setup-scheduled-tasks`

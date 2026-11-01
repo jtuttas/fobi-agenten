@@ -6,6 +6,7 @@ Plugin-Marketplace für die Lehrerfortbildung **MoodleAgentFoBi** (MMBbS Hannove
 |---|---|---|
 | `redaktion` | Orchestrator, Fan-out, Prüfer, Pipeline | `/redaktion:ausgabe <Thema>` |
 | `klassenarbeit` | Generator–Kritiker mit Überarbeitungsschleife | `/klassenarbeit:klassenarbeit <Thema>` |
+| `moodletutor` | Orchestrator, Fan-out, Konsultation, Scheduled Tasks | `/moodletutor:setup-moodletutor` |
 
 ## Installation
 
@@ -15,6 +16,7 @@ Plugin-Marketplace für die Lehrerfortbildung **MoodleAgentFoBi** (MMBbS Hannove
 claude plugin marketplace add jtuttas/fobi-agenten
 claude plugin install redaktion@fobi-agenten
 claude plugin install klassenarbeit@fobi-agenten
+claude plugin install moodletutor@fobi-agenten
 ```
 
 Ohne GitHub (ZIP entpacken): statt `jtuttas/fobi-agenten` den Pfad
@@ -117,6 +119,42 @@ erst später.
    (mit installiertem Plugin: `/klassenarbeit:klassenarbeit …`)
 6. **Reflexion:** Warum darf der Prüfer `loesung.md` erst nach dem eigenen
    Lösen öffnen? Was würde passieren, wenn Autor und Prüfer derselbe Agent wären?
+
+---
+
+## Plugin „moodletutor" – ein Agentensystem im Echtbetrieb
+
+Ein KI-Tutor für Moodle-Kurse, der an den MMBbS Hannover im Einsatz ist. Er zeigt alle Muster
+aus den Demos in einem realen System:
+
+```
+Scheduled Task (täglich / wöchentlich / alle 30 Min.)
+   │
+   ├─ moodle-abgaben-feedback   ── Fan-out ─► moodle-bewerter (je 3–5 Abgaben, parallel)
+   ├─ moodle-lernberater        ── Fan-out ─► moodle-lernberater-analyst (je 3–5 Schüler)
+   └─ moodle-nachrichten-tutor
+        ├─ Konsultation ─► moodle-bewerter / moodle-lernberater-analyst (Beratungsmodus, nur lesen)
+        └─ Fan-out ──────► moodle-nachrichten-beantworter
+```
+
+**Voraussetzung:** der MCP-Server [moodle-agent-mcp](https://github.com/jtuttas/moodle-agent-mcp),
+registriert unter dem Namen `moodle-agent`. Er pseudonymisiert alle Schülerdaten **bevor** sie das
+Modell erreichen (`S-0001 …`) und setzt die Vornamen erst beim Versand lokal wieder ein.
+
+**Einrichtung:**
+1. MCP-Server installieren und als `moodle-agent` registrieren
+2. Plugin installieren, einen leeren Arbeitsordner öffnen
+3. `/moodletutor:setup-moodletutor` – legt `tutor-config.md` (Signatur, Lehrer-userid, Moodle-URL),
+   `CLAUDE.md` und die erste `Kurs_<id>_*.md` an
+4. Erst von Hand testen, dann optional `/moodletutor:setup-scheduled-tasks`
+
+**Achtung:** Die Agenten schreiben Noten und senden Nachrichten an echte Schülerinnen und Schüler.
+Zum Ausprobieren einen Testkurs mit Testkonten verwenden.
+
+**Was man daran sehen kann**
+- Warum schreiben Subagenten *nicht* in `Bewertungs-Log.md`, sondern geben Zeilen zurück?
+- Wie verhindert der Beratungsmodus, dass eine Konsultation Seiteneffekte hat?
+- Welche Entscheidungen bleiben bewusst bei der Lehrkraft (Eskalation, Notensenkung)?
 
 ---
 

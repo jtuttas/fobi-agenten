@@ -1,0 +1,43 @@
+# Kurszusammenfassung – Kurs <ID> „<Voller Name>" (Kürzel: <kurz>)
+
+> Vorlage. Kopiere diese Datei nach `Kurs_<ID>_<Kurzname>.md`, fülle sie aus
+> (am einfachsten von Claude aus den Live-Kursdaten erzeugen lassen, siehe Skill
+> `setup-moodletutor`, Schritt 4). Nur Kurse mit einer solchen Datei
+> werden vom Tutor bearbeitet.
+>
+> Hinweis: Ausgefüllte `Kurs_<ID>_*.md`-Dateien sind lokale Konfiguration und werden
+> per `.gitignore` NICHT versioniert. Versioniert wird nur diese Vorlage.
+
+## Eckdaten
+
+- **Kurs-ID:** <ID>
+- **Voller Name:** <Voller Name>
+- **Kurzname:** <kurz>
+- **Format:** <z. B. Themenformat (topics), N Abschnitte>
+- **Laufzeit:** <TT.MM.JJJJ – TT.MM.JJJJ>
+- **Sichtbar:** <ja/nein>
+- **Moodle-Basis-URL:** {MOODLE_URL}
+
+## Inhaltlicher Schwerpunkt
+
+<Kurze Beschreibung des Themas, der Lernfeld-/Lernsituationsstruktur und der
+didaktischen Phasen. 3–6 Sätze.>
+
+## Abschnitt 0 – Allgemeines
+
+- <z. B. Forum „Ankündigungen" (cmid XXXX)>
+
+## <LS / Abschnitt 1 – Titel>
+
+<Ein bis zwei Sätze zum Abschnitt.>
+
+| Phase | Material/Aufgabe | Typ | cmid |
+|---|---|---|---|
+| 1 Informieren | <Titel> | page | <cmid> |
+| 2 Planen | <Titel> | assign | <cmid> |
+| 3 Durchführen | <Titel> | assign | <cmid> |
+| 4 Kontrollieren | <Titel> | assign | <cmid> |
+| 5 Reflektieren | <Titel> | assign | <cmid> |
+| Abschluss | <Abschlusstest> | quiz | <cmid> |
+
+<Weitere Abschnitte analog ergänzen.>

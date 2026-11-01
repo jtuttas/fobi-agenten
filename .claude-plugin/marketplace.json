@@ -15,6 +15,11 @@
       "name": "klassenarbeit",
       "source": "./plugins/klassenarbeit",
       "description": "Multi-Agenten-Demo: SQL-Klassenarbeit mit Aufgaben-Autor und unabhängigem Lösungs-Prüfer"
+    },
+    {
+      "name": "moodletutor",
+      "source": "./plugins/moodletutor",
+      "description": "KI-Tutor für Moodle: Abgaben-Feedback, Lernberater und Nachrichten-Tutor als Agentensystem (benötigt MCP-Server moodle-agent)"
     }
   ]
 }
