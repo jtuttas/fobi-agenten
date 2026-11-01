@@ -10,6 +10,11 @@
       "name": "redaktion",
       "source": "./plugins/redaktion",
       "description": "Multi-Agenten-Demo: Redaktion mit parallelen Reportern, Faktencheck und Lektorat"
+    },
+    {
+      "name": "klassenarbeit",
+      "source": "./plugins/klassenarbeit",
+      "description": "Multi-Agenten-Demo: SQL-Klassenarbeit mit Aufgaben-Autor und unabhängigem Lösungs-Prüfer"
     }
   ]
 }

@@ -1,0 +1,9 @@
+{
+  "name": "klassenarbeit",
+  "description": "Multi-Agenten-Demo: Ein Autor erstellt eine SQL-Klassenarbeit, ein unabhängiger Prüfer löst sie selbst und prüft die Musterlösung",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jörg Tuttas",
+    "email": "tuttas@mmbbs.de"
+  }
+}

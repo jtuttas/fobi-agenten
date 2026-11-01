@@ -2,6 +2,29 @@
 
 Plugin-Marketplace für die Lehrerfortbildung **MoodleAgentFoBi** (MMBbS Hannover).
 
+| Plugin | Muster | Aufruf |
+|---|---|---|
+| `redaktion` | Orchestrator, Fan-out, Prüfer, Pipeline | `/redaktion:ausgabe <Thema>` |
+| `klassenarbeit` | Generator–Kritiker mit Überarbeitungsschleife | `/klassenarbeit:klassenarbeit <Thema>` |
+
+## Installation
+
+**Claude Code**
+
+```bash
+claude plugin marketplace add jtuttas/fobi-agenten
+claude plugin install redaktion@fobi-agenten
+claude plugin install klassenarbeit@fobi-agenten
+```
+
+Ohne GitHub (ZIP entpacken): statt `jtuttas/fobi-agenten` den Pfad
+`./fobi-agenten` angeben.
+
+**Claude-App (Cowork)**: Die Dateien `redaktion.plugin` und
+`klassenarbeit.plugin` aus dem Moodle-Kurs im Chat öffnen und übernehmen.
+
+---
+
 ## Plugin „redaktion"
 
 Eine Zeitungsredaktion als Multi-Agenten-System:
@@ -24,39 +47,19 @@ Eine Zeitungsredaktion als Multi-Agenten-System:
 | faktenchecker | unabhängiger Prüfer | lesen, recherchieren, Bericht schreiben |
 | lektor | Pipeline-Endstufe | lesen, schreiben – keine Recherche |
 
-## Installation (Claude Code)
-
-```bash
-claude plugin marketplace add jtuttas/fobi-agenten
-claude plugin install redaktion@fobi-agenten
-```
-
-Ohne GitHub (ZIP entpacken):
-
-```bash
-claude plugin marketplace add ./fobi-agenten
-claude plugin install redaktion@fobi-agenten
-```
-
-## Ausprobieren
-
-In einem **leeren** Ordner:
-
-```bash
-mkdir redaktion-test && cd redaktion-test
-claude
-```
-
-Dann:
+**Ausprobieren** in einem leeren Ordner:
 
 ```
 /redaktion:ausgabe Künstliche Intelligenz in der Schule
 ```
 
+In der Claude-App: „Erstelle eine Zeitungsausgabe zum Thema Künstliche
+Intelligenz in der Schule".
+
 Es entstehen `artikel_politik.md`, `artikel_sport.md`, `artikel_kultur.md`,
 `pruefbericht.md` und `ausgabe.md`.
 
-## Arbeitsaufträge für die Fortbildung
+**Arbeitsaufträge**
 
 1. **Beobachten:** Welcher Agent läuft wann? Was läuft parallel?
 2. **Schnittstellen:** Öffnen Sie die Agenten-Dateien. Woran erkennt der
@@ -65,14 +68,54 @@ Es entstehen `artikel_politik.md`, `artikel_sport.md`, `artikel_kultur.md`,
    und starten Sie nur den Faktenchecker:
    `Nutze den faktenchecker für die vorhandenen Artikel.` Findet er den Fehler?
 4. **Werkzeuge:** Warum hat der Lektor kein `WebSearch`?
-5. **Transfer:** Entwerfen Sie ein eigenes Multi-Agenten-System für Ihren
-   Unterricht (z. B. Aufgaben-Autor + Lösungs-Prüfer).
 
-## Nutzung in der Claude-App (Cowork)
+---
 
-Die Datei `redaktion.plugin` im Chat öffnen bzw. in der Claude-Desktop-App
-installieren. Danach im Chat:
+## Plugin „klassenarbeit"
+
+Ein Autor erstellt, ein unabhängiger Prüfer löst selbst und vergleicht:
 
 ```
-Erstelle eine Zeitungsausgabe zum Thema Künstliche Intelligenz in der Schule
+/klassenarbeit:klassenarbeit <Thema>
+   │
+   ├─► aufgaben-autor      → datenbank.sql, aufgaben.md, loesung.md
+   │
+   ├─► loesungs-pruefer    → löst zuerst OHNE loesung.md, führt SQL aus,
+   │                         vergleicht danach → pruefbericht.md
+   │
+   └─► bei Befunden: Autor überarbeitet, neuer Prüfer (max. 2 Runden)
 ```
+
+| Rolle | Darf | Darf nicht |
+|---|---|---|
+| aufgaben-autor | lesen, schreiben | Code ausführen |
+| loesungs-pruefer | lesen, SQL ausführen, Bericht schreiben | Aufgaben ändern |
+
+### Übung: Findet der Prüfer die Fehler?
+
+Im Ordner [`uebung/klassenarbeit-sql`](uebung/klassenarbeit-sql) liegt eine
+fertige Klassenarbeit der Change-IT GmbH – mit **versteckten Fehlern** in
+Aufgabenstellung und Musterlösung. Wie viele es sind, verrät die Kursleitung
+erst später.
+
+1. Den Ordner `uebung/klassenarbeit-sql` in einen eigenen Arbeitsordner kopieren
+   und dort Claude starten.
+2. **Selbst prüfen (10 Min.):** Lesen Sie Aufgaben und Musterlösung. Notieren
+   Sie alle Fehler, die Sie finden.
+3. **Agent prüfen lassen:**
+   `Nutze den loesungs-pruefer für die Klassenarbeit in diesem Ordner.`
+4. **Vergleichen:** Was hat der Agent gefunden, was Sie? Gibt es Fehlalarme?
+5. **Volle Schleife:** In einem neuen, leeren Ordner
+   `/klassenarbeit:klassenarbeit SQL Joins und Gruppierung, 45 Min., 1. Ausbildungsjahr`
+6. **Reflexion:** Warum darf der Prüfer `loesung.md` erst nach dem eigenen
+   Lösen öffnen? Was würde passieren, wenn Autor und Prüfer derselbe Agent wären?
+
+---
+
+## Transfer
+
+Entwerfen Sie ein eigenes Multi-Agenten-System für Ihren Unterricht. Leitfragen:
+
+- Welche Rollen gibt es? Wer prüft unabhängig?
+- Welche Dateien sind die Schnittstellen zwischen den Rollen?
+- Welche Werkzeuge braucht jede Rolle – und welche bewusst nicht?
