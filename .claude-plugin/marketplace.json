@@ -1,0 +1,15 @@
+{
+  "name": "fobi-agenten",
+  "description": "Multi-Agenten-Beispiele für die Lehrerfortbildung MoodleAgentFoBi (MMBbS Hannover)",
+  "owner": {
+    "name": "Jörg Tuttas",
+    "email": "tuttas@mmbbs.de"
+  },
+  "plugins": [
+    {
+      "name": "redaktion",
+      "source": "./plugins/redaktion",
+      "description": "Multi-Agenten-Demo: Redaktion mit parallelen Reportern, Faktencheck und Lektorat"
+    }
+  ]
+}

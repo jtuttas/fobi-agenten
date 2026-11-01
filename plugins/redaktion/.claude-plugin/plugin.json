@@ -1,0 +1,9 @@
+{
+  "name": "redaktion",
+  "description": "Multi-Agenten-Demo: Eine Zeitungsredaktion mit parallelen Reportern, unabhängigem Faktencheck und Lektorat",
+  "version": "1.0.0",
+  "author": {
+    "name": "Jörg Tuttas",
+    "email": "tuttas@mmbbs.de"
+  }
+}
