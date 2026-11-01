@@ -19,7 +19,7 @@ Eine Zeitungsredaktion als Multi-Agenten-System:
 
 | Rolle | Muster | Darf |
 |---|---|---|
-| Chefredaktion (Slash-Befehl) | Orchestrator | nur planen und verteilen |
+| Chefredaktion (Skill „ausgabe") | Orchestrator | nur planen und verteilen |
 | reporter (1 Definition, 3× gestartet) | Fan-out | recherchieren, schreiben |
 | faktenchecker | unabhängiger Prüfer | lesen, recherchieren, Bericht schreiben |
 | lektor | Pipeline-Endstufe | lesen, schreiben – keine Recherche |
@@ -67,3 +67,12 @@ Es entstehen `artikel_politik.md`, `artikel_sport.md`, `artikel_kultur.md`,
 4. **Werkzeuge:** Warum hat der Lektor kein `WebSearch`?
 5. **Transfer:** Entwerfen Sie ein eigenes Multi-Agenten-System für Ihren
    Unterricht (z. B. Aufgaben-Autor + Lösungs-Prüfer).
+
+## Nutzung in der Claude-App (Cowork)
+
+Die Datei `redaktion.plugin` im Chat öffnen bzw. in der Claude-Desktop-App
+installieren. Danach im Chat:
+
+```
+Erstelle eine Zeitungsausgabe zum Thema Künstliche Intelligenz in der Schule
+```
