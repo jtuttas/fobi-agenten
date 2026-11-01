@@ -17,7 +17,7 @@ Auftrag     (AuftragNr PK, KundenNr FK → Kunde, MitarbeiterNr FK → Mitarbeit
              Datum [JJJJ-MM-TT], Betrag [Euro, netto])
 ```
 
-Die Beispieldaten finden Sie in `datenbank.sql`.
+Die Beispieldaten finden Sie in `material/datenbank.sql`.
 
 ## Aufgaben
 

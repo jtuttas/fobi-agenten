@@ -1,5 +1,5 @@
 -- Datenbank der Change-IT GmbH (Übungsarbeit SQL)
--- Ausführen z. B. mit: sqlite3 change_it.db < datenbank.sql
+-- Ausführen z. B. mit: sqlite3 change_it.db < material/datenbank.sql
 
 CREATE TABLE Mitarbeiter (
   MitarbeiterNr INTEGER PRIMARY KEY,

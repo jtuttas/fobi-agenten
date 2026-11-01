@@ -5,7 +5,7 @@ Plugin-Marketplace für die Lehrerfortbildung **MoodleAgentFoBi** (MMBbS Hannove
 | Plugin | Muster | Aufruf |
 |---|---|---|
 | `redaktion` | Orchestrator, Fan-out, Prüfer, Pipeline | `/redaktion:ausgabe <Thema>` |
-| `klassenarbeit` | Generator–Kritiker mit Überarbeitungsschleife | `/klassenarbeit:klassenarbeit <Thema>` |
+| `klassenarbeit` | Generator–Kritiker mit Überarbeitungsschleife (jedes Fach) | `/klassenarbeit:klassenarbeit <Fach/Thema, Dauer>` |
 | `moodletutor` | Orchestrator, Fan-out, Konsultation, Scheduled Tasks | `/moodletutor:setup-moodletutor` |
 
 ## Installation
@@ -84,15 +84,16 @@ Es entstehen `artikel_politik.md`, `artikel_sport.md`, `artikel_kultur.md`,
 
 ## Plugin „klassenarbeit"
 
-Ein Autor erstellt, ein unabhängiger Prüfer löst selbst und vergleicht:
+Ein Autor erstellt, ein unabhängiger Prüfer löst selbst und vergleicht – für **jedes Fach**:
 
 ```
-/klassenarbeit:klassenarbeit <Thema>
+/klassenarbeit:klassenarbeit <Fach/Thema, Dauer, Niveau>
    │
-   ├─► aufgaben-autor      → datenbank.sql, aufgaben.md, loesung.md
+   ├─► aufgaben-autor      → aufgaben.md, loesung.md (Erwartungshorizont), ggf. material/
    │
-   ├─► loesungs-pruefer    → löst zuerst OHNE loesung.md, führt SQL aus,
-   │                         vergleicht danach → pruefbericht.md
+   ├─► loesungs-pruefer    → löst zuerst OHNE loesung.md – ausführbare Aufgaben
+   │                         (SQL, Code, Rechnungen) führt er aus –, vergleicht
+   │                         danach → pruefbericht.md
    │
    └─► bei Befunden: Autor überarbeitet, neuer Prüfer (max. 2 Runden)
 ```
@@ -100,7 +101,10 @@ Ein Autor erstellt, ein unabhängiger Prüfer löst selbst und vergleicht:
 | Rolle | Darf | Darf nicht |
 |---|---|---|
 | aufgaben-autor | lesen, schreiben | Code ausführen |
-| loesungs-pruefer | lesen, SQL ausführen, Bericht schreiben | Aufgaben ändern |
+| loesungs-pruefer | lesen, Code/SQL ausführen, Bericht schreiben | Aufgaben ändern |
+
+Bei nicht ausführbaren Fächern (Wirtschaft, Politik, Planung) prüft er, ob jede Aufgabe
+eindeutig ist und ob der Erwartungshorizont alle vertretbaren Antworten abdeckt.
 
 ### Übung: Findet der Prüfer die Fehler?
 
@@ -123,8 +127,10 @@ erst später.
    `Nutze den loesungs-pruefer für die Klassenarbeit in diesem Ordner.`
 4. **Vergleichen:** Was hat der Agent gefunden, was Sie? Gibt es Fehlalarme?
 5. **Volle Schleife:** Eine Kopie des Ordners anlegen, darin `aufgaben.md`,
-   `loesung.md` und `datenbank.sql` löschen (`.claude` behalten) und eingeben:
+   `loesung.md` und den Ordner `material` löschen (`.claude` behalten) und eingeben, gern
+   in Ihrem eigenen Fach:
    `/klassenarbeit SQL Joins und Gruppierung, 45 Min., 1. Ausbildungsjahr`
+   `/klassenarbeit Politik: Tarifautonomie, 30 Min., Berufsschule Unterstufe`
    (mit installiertem Plugin: `/klassenarbeit:klassenarbeit …`)
 6. **Reflexion:** Warum darf der Prüfer `loesung.md` erst nach dem eigenen
    Lösen öffnen? Was würde passieren, wenn Autor und Prüfer derselbe Agent wären?

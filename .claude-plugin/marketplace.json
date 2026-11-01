@@ -14,7 +14,7 @@
     {
       "name": "klassenarbeit",
       "source": "./plugins/klassenarbeit",
-      "description": "Multi-Agenten-Demo: SQL-Klassenarbeit mit Aufgaben-Autor und unabhängigem Lösungs-Prüfer"
+      "description": "Multi-Agenten-Demo: Klassenarbeit (jedes Fach) mit Aufgaben-Autor und unabhängigem Lösungs-Prüfer"
     },
     {
       "name": "moodletutor",
